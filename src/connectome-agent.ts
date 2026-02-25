@@ -71,12 +71,18 @@ export class ConnectomeAgent {
       attentionThreshold: 0.5,
     };
 
-    // Build stream function — wrap to disable prompt caching if configured
+    // Build stream function — wrap to inject config overrides
     let streamFn = config.streamFn;
-    if (config.promptCaching === false) {
+    const needsCacheOverride = config.promptCaching === false;
+    const needsTokenOverride = typeof config.maxOutputTokens === 'number';
+    if (needsCacheOverride || needsTokenOverride) {
       const baseFn = config.streamFn ?? streamSimple;
-      streamFn = (model: any, context: any, options?: any) =>
-        baseFn(model, context, { ...options, cacheRetention: 'none' });
+      streamFn = (model: any, context: any, options?: any) => {
+        const overrides: Record<string, any> = {};
+        if (needsCacheOverride) overrides.cacheRetention = 'none';
+        if (needsTokenOverride) overrides.maxTokens = config.maxOutputTokens;
+        return baseFn(model, context, { ...options, ...overrides });
+      };
     }
 
     // Initialize the pi-agent with model and optional stream function

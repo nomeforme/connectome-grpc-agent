@@ -3,15 +3,24 @@
   "version": "0.1.0",
   "description": "Connectome agent core — pi-agent wrapped in VEIL-native agents",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
-    "dev": "tsx --watch src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "build": "tsc --build",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx --watch src/index.ts"
   },
   "dependencies": {
-    "connectome-ts": "file:../connectome-ts",
-    "@mariozechner/pi-agent-core": "^0.52.9",
-    "@mariozechner/pi-ai": "^0.52.9",
+    "connectome-ts": "workspace:*",
+    "@mariozechner/pi-agent-core": "^0.53.0",
+    "@mariozechner/pi-ai": "^0.53.0",
     "@sinclair/typebox": "^0.34.41"
   },
   "devDependencies": {

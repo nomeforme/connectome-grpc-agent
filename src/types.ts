@@ -6,9 +6,9 @@
 
 import type { AgentMessage, AgentTool, AgentEvent, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { Model } from '@mariozechner/pi-ai';
-import type { Frame, OutgoingVEILOperation, VEILState, StreamRef, Facet } from 'connectome-ts/src/veil/types.js';
-import type { AgentConfig, AgentState as ConnectomeAgentState, AgentCommand } from 'connectome-ts/src/agent/types.js';
-import type { RenderedContext } from 'connectome-ts/src/hud/types-v2.js';
+import type { Frame, OutgoingVEILOperation, VEILState, StreamRef, Facet } from 'connectome-ts';
+import type { AgentConfig, AgentState as ConnectomeAgentState, AgentCommand } from 'connectome-ts';
+import type { RenderedContext } from 'connectome-ts';
 import type { RlmConfig } from './rlm/types.js';
 
 // Re-export key types for convenience
@@ -91,6 +91,8 @@ export interface ConnectomeAgentConfig extends AgentConfig {
   streamFn?: (...args: any[]) => any;
   /** Enable prompt caching (default true). Set false for bedrock cross-region models that don't support it. */
   promptCaching?: boolean;
+  /** Max output tokens per API call. Overrides model default (model.maxTokens / 3). */
+  maxOutputTokens?: number;
   /** RLM (Recursive Sub-Agent) configuration. When set, rlm_query/rlm_check_job/rlm_cost tools are added. */
   rlm?: RlmConfig;
 }
