@@ -9,7 +9,7 @@
 
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import { Type, type TObject, type TSchema } from '@sinclair/typebox';
-import type { Facet, ActionDefinitionFacet } from 'connectome-ts';
+import type { Facet, ActionDefinitionFacet } from '@connectome/connectome-ts';
 import type { ToolHandler } from './types.js';
 
 // ---------------------------------------------------------------------------

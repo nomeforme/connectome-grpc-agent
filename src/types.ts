@@ -6,9 +6,9 @@
 
 import type { AgentMessage, AgentTool, AgentEvent, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { Model } from '@mariozechner/pi-ai';
-import type { Frame, OutgoingVEILOperation, VEILState, StreamRef, Facet } from 'connectome-ts';
-import type { AgentConfig, AgentState as ConnectomeAgentState, AgentCommand } from 'connectome-ts';
-import type { RenderedContext } from 'connectome-ts';
+import type { Frame, OutgoingVEILOperation, VEILState, StreamRef, Facet } from '@connectome/connectome-ts';
+import type { AgentConfig, AgentState as ConnectomeAgentState, AgentCommand } from '@connectome/connectome-ts';
+import type { RenderedContext } from '@connectome/connectome-ts';
 import type { RlmConfig } from './rlm/types.js';
 
 // Re-export key types for convenience

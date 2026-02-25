@@ -18,7 +18,7 @@
     "dev": "tsx --watch src/index.ts"
   },
   "dependencies": {
-    "connectome-ts": "workspace:*",
+    "@connectome/connectome-ts": "workspace:*",
     "@mariozechner/pi-agent-core": "^0.53.0",
     "@mariozechner/pi-ai": "^0.53.0",
     "@sinclair/typebox": "^0.34.41"

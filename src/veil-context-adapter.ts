@@ -28,14 +28,14 @@ import type {
   ActionFacet,
   EventFacet,
   AmbientFacet,
-} from 'connectome-ts';
+} from '@connectome/connectome-ts';
 
 import {
   hasContentAspect,
   hasAgentGeneratedAspect,
   hasStreamAspect,
   friendlyId,
-} from 'connectome-ts';
+} from '@connectome/connectome-ts';
 
 import type { VEILContextAdapterConfig, VEILStateLike } from './types.js';
 
