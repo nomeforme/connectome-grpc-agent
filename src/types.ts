@@ -171,6 +171,13 @@ export interface SpeechRecorder {
       agentId: string;
       agentName: string;
       streamId: string;
+      attachments?: Array<{
+        id: string;
+        contentType: string;
+        data: string;          // base64
+        filename?: string;
+        sizeBytes?: number;
+      }>;
     },
   ): Promise<void>;
 }
@@ -280,4 +287,8 @@ export interface ConnectomeEffectorConfig {
   maxFrames?: number;
   /** Called when an error occurs during a cycle */
   onError?: (error: Error, activation: UnifiedActivation) => void;
+  /** Drain queued attachments after agent cycle completes (e.g. from attach_file tool) */
+  drainAttachments?: () => Array<{
+    id: string; contentType: string; data: string; filename?: string; sizeBytes?: number;
+  }>;
 }

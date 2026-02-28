@@ -88,6 +88,7 @@ function veilParamToTypebox(value: unknown): TSchema {
  */
 function buildParameterSchema(
   parameters: string[] | Record<string, any> | undefined,
+  requiredFields?: string[],
 ): TObject {
   if (!parameters) {
     return Type.Object({});
@@ -108,7 +109,13 @@ function buildParameterSchema(
   if (typeof parameters === 'object') {
     const props: Record<string, TSchema> = {};
     for (const [key, value] of Object.entries(parameters)) {
-      props[key] = veilParamToTypebox(value);
+      const schema = veilParamToTypebox(value);
+      // If requiredFields is specified, wrap non-required params as Optional
+      if (requiredFields && !requiredFields.includes(key)) {
+        props[key] = Type.Optional(schema);
+      } else {
+        props[key] = schema;
+      }
     }
     return Type.Object(props);
   }
@@ -128,7 +135,7 @@ function buildParameterSchema(
  * format with TypeBox schemas and structured results.
  */
 export function toolHandlerToAgentTool(handler: ToolHandler): AgentTool {
-  const parameterSchema = buildParameterSchema(handler.parameters);
+  const parameterSchema = buildParameterSchema(handler.parameters, handler.required);
 
   return {
     name: handler.name,

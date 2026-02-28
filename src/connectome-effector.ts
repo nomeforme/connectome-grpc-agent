@@ -53,6 +53,9 @@ export class ConnectomeEffector {
   private readonly typingRefreshMs: number;
   private readonly maxFrames: number;
   private readonly onError?: (error: Error, activation: UnifiedActivation) => void;
+  private readonly drainAttachments?: () => Array<{
+    id: string; contentType: string; data: string; filename?: string; sizeBytes?: number;
+  }>;
 
   /** Streams currently being processed — prevents parallel cycles on the same stream. */
   private readonly processingStreams: Set<string> = new Set();
@@ -65,6 +68,7 @@ export class ConnectomeEffector {
     this.typingRefreshMs = config.typingRefreshMs ?? 8000;
     this.maxFrames = config.maxFrames ?? 200;
     this.onError = config.onError;
+    this.drainAttachments = config.drainAttachments;
   }
 
   // ---------------------------------------------------------------------------
@@ -136,6 +140,9 @@ export class ConnectomeEffector {
       const result = await this.agent.runWithContext(context, streamRef);
       unsub?.();
 
+      // Drain queued attachments (e.g. from attach_file tool)
+      const attachments = this.drainAttachments?.() ?? [];
+
       // Deliver speech if the agent produced any
       if (result.content) {
         const cleaned = cleanSpeechContent(result.content);
@@ -151,9 +158,26 @@ export class ConnectomeEffector {
               agentId: this.agent.id,
               agentName: this.agent.name,
               streamId,
+              attachments: attachments.length > 0 ? attachments : undefined,
+            });
+          } else if (this.speechRecorder && attachments.length > 0) {
+            // Per-turn already emitted text, but we have attachments to send
+            await this.speechRecorder.recordSpeech('', {
+              agentId: this.agent.id,
+              agentName: this.agent.name,
+              streamId,
+              attachments,
             });
           }
         }
+      } else if (this.speechRecorder && attachments.length > 0) {
+        // Agent produced no text but queued attachments
+        await this.speechRecorder.recordSpeech('', {
+          agentId: this.agent.id,
+          agentName: this.agent.name,
+          streamId,
+          attachments,
+        });
       }
 
       return result;
