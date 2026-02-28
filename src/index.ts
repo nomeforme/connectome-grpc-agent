@@ -5,7 +5,7 @@
  */
 
 // Core classes
-export { VEILContextAdapter } from './veil-context-adapter.js';
+export { VEILContextAdapter, type StreamRefWithParent } from './veil-context-adapter.js';
 export { VEILToolBridge, toolHandlerToAgentTool } from './veil-tool-bridge.js';
 export { ConnectomeAgent } from './connectome-agent.js';
 export { ConnectomeEffector } from './connectome-effector.js';

@@ -254,6 +254,12 @@ export interface EffectorAgent {
     context: AgentContext,
     streamRef?: { streamId: string; streamType?: string },
   ): Promise<ConnectomeCycleResult>;
+
+  /**
+   * Subscribe to pi-agent events (message_end, turn_end, etc.)
+   * Returns an unsubscribe function. Optional — not all agents support this.
+   */
+  subscribe?(fn: (e: AgentEvent) => void): () => void;
 }
 
 /**

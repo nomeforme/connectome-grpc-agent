@@ -109,16 +109,37 @@ function getImageAttachments(facet: Facet): ImageContent[] {
 }
 
 /**
+ * Stream reference with optional parent linkage for hierarchy-aware filtering.
+ */
+export interface StreamRefWithParent {
+  streamId: string;
+  streamType?: string;
+  parentId?: string;
+  forkSequence?: number;
+}
+
+/**
  * Check whether a frame's activeStream matches the desired streamRef.
  * If no streamRef filter is provided, every frame matches.
+ * Supports hierarchy: parent stream frames before forkSequence are included.
  */
 function frameMatchesStream(
   frame: Frame,
-  streamRef?: { streamId: string; streamType?: string },
+  streamRef?: StreamRefWithParent,
 ): boolean {
   if (!streamRef) return true;
   if (!frame.activeStream) return true; // frames with no stream are always included
-  return frame.activeStream.streamId === streamRef.streamId;
+
+  const fStreamId = frame.activeStream.streamId;
+  if (fStreamId === streamRef.streamId) return true;
+
+  // Hierarchy: include parent stream frames before fork point
+  if (streamRef.parentId && fStreamId === streamRef.parentId
+      && streamRef.forkSequence != null && frame.sequence <= streamRef.forkSequence) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -126,7 +147,7 @@ function frameMatchesStream(
  */
 function facetMatchesStream(
   facet: Facet,
-  streamRef?: { streamId: string; streamType?: string },
+  streamRef?: StreamRefWithParent,
 ): boolean {
   if (!streamRef) return true;
   if (!hasStreamAspect(facet)) return true; // facets without stream aspect are ambient

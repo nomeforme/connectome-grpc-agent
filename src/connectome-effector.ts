@@ -26,8 +26,24 @@ import type {
   SpeechRecorder,
   PlatformContext,
   UnifiedActivation,
+  AgentEvent,
 } from './types.js';
 import { cleanSpeechContent } from './utils.js';
+
+/**
+ * Extract text content from a single assistant message's content blocks.
+ */
+function extractTurnText(message: any): string | null {
+  if (!message || message.role !== 'assistant') return null;
+  const content = message.content;
+  if (!Array.isArray(content)) return null;
+  const text = content
+    .filter((b: any) => b.type === 'text')
+    .map((b: any) => b.text)
+    .join('\n')
+    .trim();
+  return text || null;
+}
 
 export class ConnectomeEffector {
   private readonly agent: EffectorAgent;
@@ -92,8 +108,33 @@ export class ConnectomeEffector {
         streamType: platformContext.streamType,
       };
 
+      // Per-turn speech: subscribe to message_end events BEFORE running the agent
+      let turnEmitted = false;
+      let unsub: (() => void) | undefined;
+
+      if (this.agent.subscribe && this.speechRecorder) {
+        unsub = this.agent.subscribe((event: AgentEvent) => {
+          if (event.type === 'message_end') {
+            const text = extractTurnText(event.message);
+            if (text) {
+              const cleaned = cleanSpeechContent(text);
+              if (cleaned) {
+                turnEmitted = true;
+                // Fire-and-forget: don't block the agent loop
+                this.speechRecorder!.recordSpeech(cleaned, {
+                  agentId: this.agent.id,
+                  agentName: this.agent.name,
+                  streamId,
+                }).catch(err => console.error('[ConnectomeEffector] Per-turn speech failed:', err));
+              }
+            }
+          }
+        });
+      }
+
       // Run the agent cycle
       const result = await this.agent.runWithContext(context, streamRef);
+      unsub?.();
 
       // Deliver speech if the agent produced any
       if (result.content) {
@@ -103,8 +144,9 @@ export class ConnectomeEffector {
           // Deliver to platform (adapter handles formatting, splitting, sending)
           await this.adapter.deliverSpeech(cleaned, platformContext);
 
-          // Record on server (so it appears in VEIL state for all participants)
-          if (this.speechRecorder) {
+          // Record on server only if per-turn didn't already emit
+          // (avoids duplicating the full concatenated output)
+          if (this.speechRecorder && !turnEmitted) {
             await this.speechRecorder.recordSpeech(cleaned, {
               agentId: this.agent.id,
               agentName: this.agent.name,
