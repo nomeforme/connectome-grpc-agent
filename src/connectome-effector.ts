@@ -31,6 +31,27 @@ import type {
 import { cleanSpeechContent } from './utils.js';
 
 /**
+ * Format an error message for display in a chat platform.
+ * Extracts human-readable messages from JSON API errors when possible.
+ */
+function formatErrorForChat(message: string): string {
+  // Try to extract a human-readable message from JSON API errors
+  // e.g. '400 {"type":"error","error":{"type":"...","message":"..."}}'
+  try {
+    const jsonStart = message.indexOf('{');
+    if (jsonStart >= 0) {
+      const json = JSON.parse(message.slice(jsonStart));
+      if (json.error?.message) {
+        return `[Error] ${json.error.message}`;
+      }
+    }
+  } catch {}
+  // Fallback: use raw message, truncated
+  const truncated = message.length > 500 ? message.slice(0, 500) + '...' : message;
+  return `[Error] ${truncated}`;
+}
+
+/**
  * Extract text content from a single assistant message's content blocks.
  */
 function extractTurnText(message: any): string | null {
@@ -185,6 +206,15 @@ export class ConnectomeEffector {
       const error = err instanceof Error ? err : new Error(String(err));
       if (this.onError) {
         this.onError(error, activation);
+      }
+      // Record error as speech so it appears in the chat platform
+      if (this.speechRecorder) {
+        const errorMsg = formatErrorForChat(error.message);
+        this.speechRecorder.recordSpeech(errorMsg, {
+          agentId: this.agent.id,
+          agentName: this.agent.name,
+          streamId,
+        }).catch(() => {});
       }
       return null;
     } finally {
