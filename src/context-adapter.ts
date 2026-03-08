@@ -54,19 +54,37 @@ export interface RenderedContextLike {
 type UserContent = string | (TextContent | ImageContent)[];
 
 function contextMsgToUserContent(msg: ContextMessage): UserContent {
-  const hasImageAttachments = msg.metadata?.attachments?.some(
+  const attachments = msg.metadata?.attachments;
+  if (!attachments || attachments.length === 0) return msg.content;
+
+  const hasImageAttachments = attachments.some(
     (a) => a.data && a.contentType?.startsWith('image/')
   );
+  const fileAttachments = attachments.filter(
+    (a) => a.data && !a.contentType?.startsWith('image/')
+  );
 
-  if (hasImageAttachments) {
+  if (hasImageAttachments || fileAttachments.length > 0) {
     const content: (TextContent | ImageContent)[] = [];
     if (msg.content) {
       content.push({ type: 'text', text: msg.content });
     }
-    for (const att of msg.metadata!.attachments!) {
+    for (const att of attachments) {
       if (att.data && att.contentType?.startsWith('image/')) {
         content.push({ type: 'image', data: att.data, mimeType: att.contentType });
       }
+    }
+    // Annotate non-image file attachments so the agent knows they're available
+    if (fileAttachments.length > 0) {
+      const lines = fileAttachments.map((att) => {
+        const name = att.name || att.id || 'unnamed';
+        const size = att.size ? `${(att.size / 1024).toFixed(1)}KB` : 'unknown size';
+        return `  - ${name} (${att.contentType || 'unknown type'}, ${size})`;
+      });
+      content.push({
+        type: 'text',
+        text: `[Attached files — use save_attachment to save to workspace:\n${lines.join('\n')}]`,
+      });
     }
     return content;
   }
