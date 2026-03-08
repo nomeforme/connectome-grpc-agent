@@ -81,6 +81,9 @@ export class ConnectomeEffector {
   /** Streams currently being processed — prevents parallel cycles on the same stream. */
   private readonly processingStreams: Set<string> = new Set();
 
+  /** Streams where abort was requested — prevents error recording for intentional stops. */
+  private readonly abortedStreams: Set<string> = new Set();
+
   constructor(config: ConnectomeEffectorConfig) {
     this.agent = config.agent;
     this.adapter = config.adapter;
@@ -108,14 +111,24 @@ export class ConnectomeEffector {
     const { streamId, platformContext } = activation;
     const prefix = `[ConnectomeEffector:${this.agent.name}]`;
 
-    // Deduplicate — don't run two cycles on the same stream concurrently
-    if (this.processingStreams.has(streamId)) {
-      console.log(`${prefix} Skipping activation on ${streamId} — already processing`);
+    // Deduplicate — the agent can only run one cycle at a time.
+    // Reject if ANY stream is currently processing (not just this one).
+    if (this.processingStreams.size > 0) {
+      const busyStreams = [...this.processingStreams].join(', ');
+      console.log(`${prefix} Skipping activation on ${streamId} — agent busy on ${busyStreams}`);
+      if (this.speechRecorder) {
+        this.speechRecorder.recordSpeech('[Busy — still processing a previous request]', {
+          agentId: this.agent.id,
+          agentName: this.agent.name,
+          streamId,
+        }).catch(() => {});
+      }
       return null;
     }
     this.processingStreams.add(streamId);
 
     let typingInterval: ReturnType<typeof setInterval> | undefined;
+    let unsub: (() => void) | undefined;
     const cycleStart = Date.now();
 
     try {
@@ -140,7 +153,6 @@ export class ConnectomeEffector {
       // Per-turn speech: subscribe to message_end events BEFORE running the agent
       let turnEmitted = false;
       let turnCount = 0;
-      let unsub: (() => void) | undefined;
 
       if (this.agent.subscribe && this.speechRecorder) {
         unsub = this.agent.subscribe((event: AgentEvent) => {
@@ -162,6 +174,7 @@ export class ConnectomeEffector {
                   agentId: this.agent.id,
                   agentName: this.agent.name,
                   streamId,
+                  cyclePending: true,
                 }).catch(err => console.error(`${prefix} Per-turn speech failed:`, err));
               }
             }
@@ -172,7 +185,6 @@ export class ConnectomeEffector {
       // Run the agent cycle
       console.log(`${prefix} Running agent cycle...`);
       const result = await this.agent.runWithContext(context, streamRef, activation.continuation);
-      unsub?.();
       const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
 
       console.log(`${prefix} Cycle complete: ${elapsed}s, ${result.messages?.length ?? 0} new messages, ${result.tokensUsed ?? 0} tokens, content=${result.content?.length ?? 0} chars, turnEmitted=${turnEmitted}, turns=${turnCount}`);
@@ -230,6 +242,20 @@ export class ConnectomeEffector {
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
       const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
+
+      // Check if this was an intentional abort (!stop command)
+      if (this.abortedStreams.has(streamId)) {
+        console.log(`${prefix} Cycle stopped by user after ${elapsed}s`);
+        if (this.speechRecorder) {
+          this.speechRecorder.recordSpeech('[Cycle stopped]', {
+            agentId: this.agent.id,
+            agentName: this.agent.name,
+            streamId,
+          }).catch(() => {});
+        }
+        return null;
+      }
+
       console.error(`${prefix} Cycle FAILED after ${elapsed}s: ${error.message}`);
       if (this.onError) {
         this.onError(error, activation);
@@ -245,9 +271,46 @@ export class ConnectomeEffector {
       }
       return null;
     } finally {
+      unsub?.();
       if (typingInterval) clearInterval(typingInterval);
       this.processingStreams.delete(streamId);
+      this.abortedStreams.delete(streamId);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agent control (stop / steer)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Abort the current agent cycle. Returns true if there was an active cycle.
+   * The cycle's catch block will detect the abort and emit a clean confirmation
+   * instead of an error message.
+   */
+  abort(): boolean {
+    if (this.processingStreams.size === 0) return false;
+    // Mark all active streams as intentionally aborted
+    for (const sid of this.processingStreams) {
+      this.abortedStreams.add(sid);
+    }
+    if (this.agent.abort) {
+      this.agent.abort();
+      console.log(`[ConnectomeEffector:${this.agent.name}] Abort requested (${this.processingStreams.size} active stream(s))`);
+    }
+    return true;
+  }
+
+  /**
+   * Steer the agent mid-run by injecting a user message. Returns true if
+   * there was an active cycle to steer.
+   */
+  steer(message: string): boolean {
+    if (this.processingStreams.size === 0) return false;
+    if (this.agent.steer) {
+      this.agent.steer(message);
+      console.log(`[ConnectomeEffector:${this.agent.name}] Steer injected: ${message.substring(0, 80)}`);
+    }
+    return true;
   }
 
   // ---------------------------------------------------------------------------

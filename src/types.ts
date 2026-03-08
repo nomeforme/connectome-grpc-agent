@@ -178,6 +178,9 @@ export interface SpeechRecorder {
         filename?: string;
         sizeBytes?: number;
       }>;
+      /** When true, the agent cycle is still running (per-turn speech). Platform
+       *  adapters should keep typing indicators alive instead of clearing them. */
+      cyclePending?: boolean;
     },
   ): Promise<void>;
 }
@@ -273,6 +276,19 @@ export interface EffectorAgent {
    * Returns an unsubscribe function. Optional — not all agents support this.
    */
   subscribe?(fn: (e: AgentEvent) => void): () => void;
+
+  /**
+   * Abort the current cycle. Stops LLM streaming and tool execution.
+   * Optional — not all agents support this.
+   */
+  abort?(): void;
+
+  /**
+   * Steer the agent mid-run by injecting a user message into the conversation.
+   * The message is delivered after the current tool execution completes.
+   * Optional — not all agents support this.
+   */
+  steer?(message: string): void;
 }
 
 /**
