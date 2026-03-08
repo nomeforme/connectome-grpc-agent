@@ -237,6 +237,8 @@ export interface UnifiedActivation {
   platformContext: PlatformContext;
   messageContent: string;
   authorName: string;
+  /** When true, the agent continues from its last truncated output instead of starting a new response. */
+  continuation?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,10 +258,14 @@ export interface EffectorAgent {
    * This is the primary path used by the effector — works with both
    * server-side (VEILContextAdapter → AgentContext) and client-side
    * (gRPC → AgentContext) context sources.
+   *
+   * When continuation is true, the agent resumes from its last assistant
+   * message (prefill/completion mode) instead of prompting with a new user message.
    */
   runWithContext(
     context: AgentContext,
     streamRef?: { streamId: string; streamType?: string },
+    continuation?: boolean,
   ): Promise<ConnectomeCycleResult>;
 
   /**

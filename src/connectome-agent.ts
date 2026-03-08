@@ -59,10 +59,12 @@ export class ConnectomeAgent {
   private rlmState: RlmState | null = null;
   private rlmTools: AgentTool[] = [];
   private rlmPromptFragment: string = '';
+  private _maxOutputTokens: number | undefined;
 
   constructor(config: ConnectomeAgentConfig) {
     this.config = config;
     this.agentId = this.createAgentId(config.name);
+    this._maxOutputTokens = config.maxOutputTokens;
 
     // Initialize behavioral state
     this.agentState = {
@@ -71,19 +73,16 @@ export class ConnectomeAgent {
       attentionThreshold: 0.5,
     };
 
-    // Build stream function — wrap to inject config overrides
-    let streamFn = config.streamFn;
+    // Build stream function — wrap to inject config overrides (always wrap so maxOutputTokens can be changed at runtime)
+    const baseFn = config.streamFn ?? streamSimple;
     const needsCacheOverride = config.promptCaching === false;
-    const needsTokenOverride = typeof config.maxOutputTokens === 'number';
-    if (needsCacheOverride || needsTokenOverride) {
-      const baseFn = config.streamFn ?? streamSimple;
-      streamFn = (model: any, context: any, options?: any) => {
-        const overrides: Record<string, any> = {};
-        if (needsCacheOverride) overrides.cacheRetention = 'none';
-        if (needsTokenOverride) overrides.maxTokens = config.maxOutputTokens;
-        return baseFn(model, context, { ...options, ...overrides });
-      };
-    }
+    const self = this;
+    let streamFn: typeof baseFn | undefined = (model: any, context: any, options?: any) => {
+      const overrides: Record<string, any> = {};
+      if (needsCacheOverride) overrides.cacheRetention = 'none';
+      if (typeof self._maxOutputTokens === 'number') overrides.maxTokens = self._maxOutputTokens;
+      return baseFn(model, context, { ...options, ...overrides });
+    };
 
     // Initialize the pi-agent with model and optional stream function
     this.piAgent = new Agent({
@@ -139,6 +138,21 @@ export class ConnectomeAgent {
   /** Agent display name */
   get name(): string {
     return this.config.name ?? this.agentId;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Runtime config
+  // ---------------------------------------------------------------------------
+
+  /** Get current max output tokens override (undefined = model default) */
+  getMaxOutputTokens(): number | undefined {
+    return this._maxOutputTokens;
+  }
+
+  /** Set max output tokens at runtime. Pass undefined to reset to model default. */
+  setMaxOutputTokens(value: number | undefined): void {
+    this._maxOutputTokens = value;
+    console.log(`[ConnectomeAgent:${this.name}] maxOutputTokens set to ${value ?? 'model default'}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -252,6 +266,7 @@ export class ConnectomeAgent {
   async runWithContext(
     context: AgentContext,
     streamRef?: { streamId: string; streamType?: string },
+    continuation?: boolean,
   ): Promise<ConnectomeCycleResult> {
     const { messages, systemPrompt } = context;
 
@@ -267,7 +282,28 @@ export class ConnectomeAgent {
     const extraTools = this.config.extraTools ?? [];
     this.piAgent.setTools([...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools]);
 
-    // Split into history + latest user message
+    if (continuation) {
+      // Continuation mode: load all messages and call continue() so the model
+      // resumes from its last assistant turn (prefill/completion style).
+      // The context already contains the bot's previous speech as assistant messages,
+      // so the model sees its own output and continues naturally.
+      this.piAgent.replaceMessages(messages);
+      const messageCountBefore = this.piAgent.state.messages.length;
+      console.log(`[ConnectomeAgent:${this.name}] Continuation mode — resuming from ${messages.length} messages`);
+      await this.piAgent.continue();
+      await this.piAgent.waitForIdle();
+      if (this.piAgent.state.error) {
+        throw new Error(this.piAgent.state.error);
+      }
+      const allMessages = this.piAgent.state.messages;
+      const newMessages = allMessages.slice(messageCountBefore);
+      const content = this.extractTextContent(newMessages);
+      const tokensUsed = this.extractTokenUsage(newMessages);
+      const operations = this.contextAdapter.messagesToVEILOps(newMessages, streamRef);
+      return { content, operations, messages: newMessages, tokensUsed };
+    }
+
+    // Normal mode: split into history + latest user message
     const { history, userMessage } = this.splitMessages(messages);
     this.piAgent.replaceMessages(history);
 

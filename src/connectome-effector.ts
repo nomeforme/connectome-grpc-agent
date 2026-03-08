@@ -158,7 +158,7 @@ export class ConnectomeEffector {
       }
 
       // Run the agent cycle
-      const result = await this.agent.runWithContext(context, streamRef);
+      const result = await this.agent.runWithContext(context, streamRef, activation.continuation);
       unsub?.();
 
       // Drain queued attachments (e.g. from attach_file tool)
