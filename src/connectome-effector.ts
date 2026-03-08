@@ -106,14 +106,17 @@ export class ConnectomeEffector {
     activation: UnifiedActivation,
   ): Promise<ConnectomeCycleResult | null> {
     const { streamId, platformContext } = activation;
+    const prefix = `[ConnectomeEffector:${this.agent.name}]`;
 
     // Deduplicate — don't run two cycles on the same stream concurrently
     if (this.processingStreams.has(streamId)) {
+      console.log(`${prefix} Skipping activation on ${streamId} — already processing`);
       return null;
     }
     this.processingStreams.add(streamId);
 
     let typingInterval: ReturnType<typeof setInterval> | undefined;
+    const cycleStart = Date.now();
 
     try {
       // Start typing indicator
@@ -126,6 +129,7 @@ export class ConnectomeEffector {
       const context = await this.contextProvider.getContext(streamId, {
         maxFrames: this.maxFrames,
       });
+      console.log(`${prefix} Context: ${context.messages.length} messages, sysprompt ${context.systemPrompt.length} chars`);
 
       // Build stream ref for the agent cycle
       const streamRef = {
@@ -135,22 +139,30 @@ export class ConnectomeEffector {
 
       // Per-turn speech: subscribe to message_end events BEFORE running the agent
       let turnEmitted = false;
+      let turnCount = 0;
       let unsub: (() => void) | undefined;
 
       if (this.agent.subscribe && this.speechRecorder) {
         unsub = this.agent.subscribe((event: AgentEvent) => {
           if (event.type === 'message_end') {
+            turnCount++;
             const text = extractTurnText(event.message);
+            const textLen = text?.length ?? 0;
+            const contentTypes = Array.isArray((event.message as any)?.content)
+              ? (event.message as any).content.map((b: any) => b.type).join(',')
+              : 'none';
+            console.log(`${prefix} message_end #${turnCount}: role=${(event.message as any)?.role} contentTypes=[${contentTypes}] textLen=${textLen}`);
             if (text) {
               const cleaned = cleanSpeechContent(text);
               if (cleaned) {
                 turnEmitted = true;
+                console.log(`${prefix} Per-turn speech #${turnCount}: ${cleaned.length} chars`);
                 // Fire-and-forget: don't block the agent loop
                 this.speechRecorder!.recordSpeech(cleaned, {
                   agentId: this.agent.id,
                   agentName: this.agent.name,
                   streamId,
-                }).catch(err => console.error('[ConnectomeEffector] Per-turn speech failed:', err));
+                }).catch(err => console.error(`${prefix} Per-turn speech failed:`, err));
               }
             }
           }
@@ -158,8 +170,12 @@ export class ConnectomeEffector {
       }
 
       // Run the agent cycle
+      console.log(`${prefix} Running agent cycle...`);
       const result = await this.agent.runWithContext(context, streamRef, activation.continuation);
       unsub?.();
+      const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
+
+      console.log(`${prefix} Cycle complete: ${elapsed}s, ${result.messages?.length ?? 0} new messages, ${result.tokensUsed ?? 0} tokens, content=${result.content?.length ?? 0} chars, turnEmitted=${turnEmitted}, turns=${turnCount}`);
 
       // Drain queued attachments (e.g. from attach_file tool)
       const attachments = this.drainAttachments?.() ?? [];
@@ -175,6 +191,7 @@ export class ConnectomeEffector {
           // Record on server only if per-turn didn't already emit
           // (avoids duplicating the full concatenated output)
           if (this.speechRecorder && !turnEmitted) {
+            console.log(`${prefix} Recording final speech: ${cleaned.length} chars`);
             await this.speechRecorder.recordSpeech(cleaned, {
               agentId: this.agent.id,
               agentName: this.agent.name,
@@ -182,6 +199,7 @@ export class ConnectomeEffector {
               attachments: attachments.length > 0 ? attachments : undefined,
             });
           } else if (this.speechRecorder && attachments.length > 0) {
+            console.log(`${prefix} Per-turn already emitted, recording attachments only`);
             // Per-turn already emitted text, but we have attachments to send
             await this.speechRecorder.recordSpeech('', {
               agentId: this.agent.id,
@@ -189,21 +207,30 @@ export class ConnectomeEffector {
               streamId,
               attachments,
             });
+          } else if (turnEmitted) {
+            console.log(`${prefix} Per-turn already emitted ${turnCount} turn(s), skipping final record`);
           }
+        } else {
+          console.log(`${prefix} Content produced but cleaned to empty`);
         }
-      } else if (this.speechRecorder && attachments.length > 0) {
-        // Agent produced no text but queued attachments
-        await this.speechRecorder.recordSpeech('', {
-          agentId: this.agent.id,
-          agentName: this.agent.name,
-          streamId,
-          attachments,
-        });
+      } else {
+        console.log(`${prefix} No content produced`);
+        if (this.speechRecorder && attachments.length > 0) {
+          // Agent produced no text but queued attachments
+          await this.speechRecorder.recordSpeech('', {
+            agentId: this.agent.id,
+            agentName: this.agent.name,
+            streamId,
+            attachments,
+          });
+        }
       }
 
       return result;
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
+      const elapsed = ((Date.now() - cycleStart) / 1000).toFixed(1);
+      console.error(`${prefix} Cycle FAILED after ${elapsed}s: ${error.message}`);
       if (this.onError) {
         this.onError(error, activation);
       }
