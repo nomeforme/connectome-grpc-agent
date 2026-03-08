@@ -31,7 +31,7 @@ import {
   getSkillContent,
   type Skill,
 } from './skill-loader.js';
-import { initRlmState } from './rlm/state.js';
+import { initRlmState, resetRlmStateForCycle } from './rlm/state.js';
 import { createRlmQueryTool, createRlmCheckJobTool, createRlmCostTool } from './rlm/tools.js';
 import { buildRlmSystemPromptFragment } from './rlm/system-prompt.js';
 import type { RlmState } from './rlm/types.js';
@@ -117,6 +117,17 @@ export class ConnectomeAgent {
     // Initialize RLM (recursive sub-agent) if configured
     if (config.rlm) {
       this.rlmState = initRlmState(config.rlm);
+
+      // Wire native execution: child agents use the same stream function,
+      // model, and tools as the parent (tools evaluated lazily each call).
+      this.rlmState.streamFn = streamFn;
+      this.rlmState.parentModel = config.model;
+      this.rlmState.getParentTools = () => {
+        const veilTools = this.toolBridge.getAllTools();
+        const extraTools = this.config.extraTools ?? [];
+        return [...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools];
+      };
+
       this.rlmTools = [
         createRlmQueryTool(config.rlm, this.rlmState),
         createRlmCheckJobTool(config.rlm, this.rlmState),
@@ -179,12 +190,18 @@ export class ConnectomeAgent {
     veilState: any, // VEILStateManager or VEILState-like object
     streamRef?: { streamId: string; streamType?: string },
   ): Promise<ConnectomeCycleResult> {
+    // Reset RLM per-activation counters (timeout + call count)
+    if (this.rlmState) resetRlmStateForCycle(this.rlmState);
+
     // 1. Convert VEIL state to messages
     const messages = this.contextAdapter.renderToMessages(veilState, streamRef);
 
     // 2. Build system prompt (base + ambient facets + skills + RLM)
     const systemPrompt =
       this.contextAdapter.getSystemPrompt(veilState, streamRef) + this.skillPromptFragment + this.rlmPromptFragment;
+
+    // Pass composed system prompt to RLM so child agents inherit it
+    if (this.rlmState) this.rlmState.parentSystemPrompt = systemPrompt;
 
     // 3. Configure pi-agent for this cycle
     this.piAgent.setSystemPrompt(systemPrompt);
@@ -268,11 +285,18 @@ export class ConnectomeAgent {
     streamRef?: { streamId: string; streamType?: string },
     continuation?: boolean,
   ): Promise<ConnectomeCycleResult> {
+    // Reset RLM per-activation counters (timeout + call count)
+    if (this.rlmState) resetRlmStateForCycle(this.rlmState);
+
     const { messages, systemPrompt } = context;
 
     // Configure pi-agent (append skill descriptions + RLM to system prompt)
-    this.piAgent.setSystemPrompt(systemPrompt + this.skillPromptFragment + this.rlmPromptFragment);
+    const composedPrompt = systemPrompt + this.skillPromptFragment + this.rlmPromptFragment;
+    this.piAgent.setSystemPrompt(composedPrompt);
     this.piAgent.setModel(this.config.model);
+
+    // Pass composed system prompt to RLM so child agents inherit it
+    if (this.rlmState) this.rlmState.parentSystemPrompt = composedPrompt;
 
     if (this.config.thinkingLevel) {
       this.piAgent.setThinkingLevel(this.config.thinkingLevel);

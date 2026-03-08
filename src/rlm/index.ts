@@ -12,7 +12,7 @@ export type {
 } from './types.js';
 
 // State initialization
-export { initRlmState } from './state.js';
+export { initRlmState, resetRlmStateForCycle } from './state.js';
 
 // Guardrails
 export { checkGuardrails, parseCostFile } from './guardrails.js';

@@ -32,6 +32,7 @@ export {
 // RLM (Recursive Sub-Agent)
 export {
   initRlmState,
+  resetRlmStateForCycle,
   checkGuardrails,
   parseCostFile,
   buildEnv,

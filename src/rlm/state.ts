@@ -12,6 +12,16 @@ import { tmpdir } from 'node:os';
 import type { RlmConfig, RlmState } from './types.js';
 
 /**
+ * Reset per-activation fields on an existing RLM state.
+ * Called at the start of each agent cycle so that timeout / call-count
+ * limits apply per-activation rather than accumulating across the session.
+ */
+export function resetRlmStateForCycle(state: RlmState): void {
+  state.startTime = Date.now();
+  state.callCount = 0;
+}
+
+/**
  * Initialize RLM runtime state from config.
  * Called once during ConnectomeAgent construction when `config.rlm` is set.
  */

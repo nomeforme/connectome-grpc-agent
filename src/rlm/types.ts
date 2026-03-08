@@ -67,6 +67,14 @@ export interface RlmState {
   costFilePath: string | null;
   /** Map of active async jobs by jobId */
   asyncJobs: Map<string, RlmAsyncJob>;
+  /** Callback to get parent agent's current tools (for native RLM execution) */
+  getParentTools?: () => any[];
+  /** Stream function from parent agent (for native RLM execution) */
+  streamFn?: (...args: any[]) => any;
+  /** Parent agent's Model object (for native RLM child agents) */
+  parentModel?: any;
+  /** Parent agent's fully composed system prompt (base + skills + RLM), updated each cycle */
+  parentSystemPrompt?: string;
 }
 
 // ---------------------------------------------------------------------------

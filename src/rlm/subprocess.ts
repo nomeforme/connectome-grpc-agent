@@ -124,7 +124,6 @@ export function execRlmSync(options: ExecOptions): Promise<RlmSyncResult> {
       env,
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: true,
     });
 
     // Track cost before this call for delta
@@ -237,7 +236,6 @@ export function execRlmAsync(options: ExecOptions): Promise<RlmAsyncResult> {
       env,
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: true,
     });
 
     let stdout = '';

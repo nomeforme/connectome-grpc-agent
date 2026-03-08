@@ -2,24 +2,97 @@
  * RLM AgentTool factories — creates pi-agent tools for recursive sub-agent calls.
  *
  * Three tools:
- * 1. rlm_query — spawn a sub-agent (sync or async)
+ * 1. rlm_query — spawn a sub-agent (native pi-agent-core Agent)
  * 2. rlm_check_job — check status of an async job
  * 3. rlm_cost — report cost/token usage
  */
 
 import { Type } from '@sinclair/typebox';
-import { existsSync, readFileSync } from 'node:fs';
-import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
-import type { RlmConfig, RlmState, RlmToolDetails } from './types.js';
+import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { Agent } from '@mariozechner/pi-agent-core';
+import type { AgentTool, AgentToolResult, AgentMessage } from '@mariozechner/pi-agent-core';
+import type { RlmConfig, RlmState, RlmToolDetails, RlmAsyncJob } from './types.js';
 import { checkGuardrails, parseCostFile } from './guardrails.js';
-import { execRlmSync, execRlmAsync } from './subprocess.js';
 
 // ---------------------------------------------------------------------------
-// rlm_query — primary recursion tool
+// rlm_query — primary recursion tool (native Agent execution)
 // ---------------------------------------------------------------------------
 
 /**
+ * Build a system prompt for the child agent.
+ * Inherits the parent's full system prompt (identity, skills, tool guidance)
+ * and appends sub-agent context.
+ */
+function buildChildSystemPrompt(config: RlmConfig, state: RlmState): string {
+  const parts: string[] = [];
+
+  // Inherit parent's composed system prompt (base + skills + RLM guidance)
+  if (state.parentSystemPrompt) {
+    parts.push(state.parentSystemPrompt);
+  }
+
+  // Fall back to custom system prompt file if no parent prompt available
+  if (!state.parentSystemPrompt && config.systemPromptFile) {
+    try {
+      parts.push(readFileSync(config.systemPromptFile, 'utf-8'));
+    } catch {
+      // File not found — skip
+    }
+  }
+
+  // Add sub-agent context
+  const childDepth = state.depth + 1;
+  const maxDepth = config.maxDepth ?? 3;
+  const remaining = maxDepth - childDepth;
+
+  parts.push(`\n## Sub-Agent Context\nYou are a recursive sub-agent (depth ${childDepth}/${maxDepth}, ${remaining} level${remaining !== 1 ? 's' : ''} remaining). You have the same tools and capabilities as the parent agent. Always use your tools to perform actions — never simulate or describe performing an action without executing it.`);
+
+  if (remaining > 0) {
+    parts.push('You can spawn further sub-agents via the `rlm_query` tool if needed.');
+  } else {
+    parts.push('You are at the maximum recursion depth and cannot spawn further sub-agents.');
+  }
+
+  return parts.join('\n');
+}
+
+/**
+ * Extract text content from agent messages.
+ */
+function extractText(messages: AgentMessage[]): string {
+  const parts: string[] = [];
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue;
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'text' && typeof (block as any).text === 'string') {
+          parts.push((block as any).text);
+        }
+      }
+    }
+  }
+  return parts.join('\n').trim();
+}
+
+/**
+ * Extract total token usage from agent messages.
+ */
+function extractTokens(messages: AgentMessage[]): number {
+  let total = 0;
+  for (const msg of messages) {
+    if (msg.role !== 'assistant') continue;
+    const usage = (msg as any).usage;
+    if (!usage) continue;
+    if (typeof usage.totalTokens === 'number') total += usage.totalTokens;
+    else if (typeof usage.input === 'number' && typeof usage.output === 'number') total += usage.input + usage.output;
+  }
+  return total;
+}
+
+/**
  * Create the rlm_query tool for spawning sub-agents.
+ * Uses native pi-agent-core Agent instead of subprocess.
  */
 export function createRlmQueryTool(config: RlmConfig, state: RlmState): AgentTool<any, RlmToolDetails> {
   const maxDepth = config.maxDepth ?? 3;
@@ -45,7 +118,7 @@ export function createRlmQueryTool(config: RlmConfig, state: RlmState): AgentToo
       prompt: Type.String({ description: 'The task or question for the sub-agent. Be specific and self-contained.' }),
       fork: Type.Optional(Type.Boolean({ description: 'Fork parent session into child, carrying conversation history. Default: false (fresh context).' })),
       async: Type.Optional(Type.Boolean({ description: 'Run in background, returning immediately with a job ID. Use rlm_check_job to poll for results.' })),
-      context: Type.Optional(Type.String({ description: 'Additional context data to pipe to the sub-agent via stdin.' })),
+      context: Type.Optional(Type.String({ description: 'Additional context data provided to the sub-agent.' })),
     }),
     execute: async (
       _toolCallId: string,
@@ -62,52 +135,109 @@ export function createRlmQueryTool(config: RlmConfig, state: RlmState): AgentToo
         };
       }
 
+      // Verify native execution is available
+      if (!state.streamFn || !state.getParentTools) {
+        return {
+          content: [{ type: 'text', text: 'rlm_query failed: native execution not configured (streamFn or getParentTools missing on RlmState).' }],
+          details: { rlmTool: 'rlm_query', error: 'native execution not configured' },
+        };
+      }
+
       try {
-        // Async mode
-        if (params.async) {
-          const result = await execRlmAsync({
-            config,
-            state,
-            prompt: params.prompt,
-            fork: params.fork,
-            context: params.context,
+        const model = state.parentModel;
+        const systemPrompt = buildChildSystemPrompt(config, state);
+
+        // Create child Agent
+        const childAgent = new Agent({
+          initialState: {
+            model,
+            thinkingLevel: 'off',
+            systemPrompt,
+          },
+          streamFn: state.streamFn,
+        });
+
+        // Get parent's tools, filter out rlm_query at max depth
+        const parentTools = state.getParentTools() as AgentTool[];
+        const childAtMaxDepth = state.depth + 1 >= maxDepth;
+        const childTools = childAtMaxDepth
+          ? parentTools.filter((t: AgentTool) => t.name !== 'rlm_query')
+          : parentTools;
+        childAgent.setTools(childTools);
+
+        // Stream partial output if callback provided
+        let unsub: (() => void) | undefined;
+        if (onUpdate) {
+          unsub = childAgent.subscribe((event: any) => {
+            if (event.type === 'text' && event.text) {
+              onUpdate({
+                content: [{ type: 'text', text: event.text }],
+                details: { rlmTool: 'rlm_query' },
+              });
+            }
           });
+        }
+
+        // Build prompt with optional context
+        let fullPrompt = params.prompt;
+        if (params.context) {
+          fullPrompt = `<context>\n${params.context}\n</context>\n\n${params.prompt}`;
+        }
+
+        // Async mode — run in background, track as async job
+        if (params.async) {
+          const jobId = `rlm_native_${randomUUID().slice(0, 8)}`;
+          const jobPromise = (async () => {
+            const msgCountBefore = childAgent.state.messages.length;
+            await childAgent.prompt(fullPrompt);
+            await childAgent.waitForIdle();
+            return childAgent.state.messages.slice(msgCountBefore);
+          })();
+
+          // Store as async job with a promise-based approach
+          const job: RlmAsyncJob = {
+            jobId,
+            outputPath: '', // Not file-based in native mode
+            sentinelPath: '', // Not file-based in native mode
+            pid: 0, // No subprocess
+            prompt: params.prompt,
+          };
+          // Attach the promise and unsub for later retrieval
+          (job as any)._promise = jobPromise;
+          (job as any)._unsub = unsub;
+          (job as any)._childAgent = childAgent;
+          state.asyncJobs.set(jobId, job);
+          state.callCount++;
 
           return {
-            content: [{ type: 'text', text: `Async job started: ${result.job.jobId}\nOutput will be at: ${result.job.outputPath}\nUse rlm_check_job with this job_id to check status.` }],
-            details: { rlmTool: 'rlm_query', async: true, jobId: result.job.jobId },
+            content: [{ type: 'text', text: `Async job started: ${jobId}\nUse rlm_check_job with this job_id to check status.` }],
+            details: { rlmTool: 'rlm_query', async: true, jobId },
           };
         }
 
-        // Sync mode — stream partial output via onUpdate
-        const result = await execRlmSync({
-          config,
-          state,
-          prompt: params.prompt,
-          fork: params.fork,
-          context: params.context,
-          signal,
-          onChunk: onUpdate
-            ? (chunk) => {
-                onUpdate({
-                  content: [{ type: 'text', text: chunk }],
-                  details: { rlmTool: 'rlm_query' },
-                });
-              }
-            : undefined,
-        });
+        // Sync mode — run to completion
+        const msgCountBefore = childAgent.state.messages.length;
+        await childAgent.prompt(fullPrompt);
+        await childAgent.waitForIdle();
+        state.callCount++;
+
+        if (unsub) unsub();
+
+        const newMessages = childAgent.state.messages.slice(msgCountBefore);
+        const output = extractText(newMessages);
+        const totalTokens = extractTokens(newMessages);
 
         const details: RlmToolDetails = {
           rlmTool: 'rlm_query',
-          cost: result.cost ?? undefined,
+          cost: { cost: 0, tokens: totalTokens, calls: 1 },
         };
 
-        if (result.exitCode !== 0) {
-          details.error = `Exit code ${result.exitCode}`;
+        if (childAgent.state.error) {
+          details.error = childAgent.state.error;
         }
 
         return {
-          content: [{ type: 'text', text: result.output || '(no output)' }],
+          content: [{ type: 'text', text: output || '(no output)' }],
           details,
         };
       } catch (err) {
@@ -143,7 +273,6 @@ export function createRlmCheckJobTool(_config: RlmConfig, state: RlmState): Agen
       const job = state.asyncJobs.get(params.job_id);
 
       if (!job) {
-        // List known jobs to help the agent
         const knownIds = Array.from(state.asyncJobs.keys());
         const hint = knownIds.length > 0
           ? ` Known job IDs: ${knownIds.join(', ')}`
@@ -154,17 +283,45 @@ export function createRlmCheckJobTool(_config: RlmConfig, state: RlmState): Agen
         };
       }
 
-      // Check sentinel file
-      const done = existsSync(job.sentinelPath);
+      // Native async jobs use a promise instead of sentinel files
+      const promise = (job as any)._promise as Promise<AgentMessage[]> | undefined;
+      if (promise) {
+        // Check if the promise has resolved by racing with an immediate resolve
+        const PENDING = Symbol('pending');
+        const result = await Promise.race([promise, Promise.resolve(PENDING)]);
 
-      if (!done) {
+        if (result === PENDING) {
+          return {
+            content: [{ type: 'text', text: `Job ${params.job_id} is still running.` }],
+            details: { rlmTool: 'rlm_check_job', jobId: params.job_id },
+          };
+        }
+
+        // Job is done — extract output
+        const messages = result as AgentMessage[];
+        const output = extractText(messages);
+        const totalTokens = extractTokens(messages);
+
+        // Clean up
+        const unsub = (job as any)._unsub as (() => void) | undefined;
+        if (unsub) unsub();
+        state.asyncJobs.delete(params.job_id);
+
+        return {
+          content: [{ type: 'text', text: output || '(no output)' }],
+          details: { rlmTool: 'rlm_check_job', jobId: params.job_id, cost: { cost: 0, tokens: totalTokens, calls: 1 } },
+        };
+      }
+
+      // Fallback: file-based sentinel (legacy subprocess mode)
+      const { existsSync: exists } = await import('node:fs');
+      if (!exists(job.sentinelPath)) {
         return {
           content: [{ type: 'text', text: `Job ${params.job_id} is still running (PID ${job.pid}).` }],
           details: { rlmTool: 'rlm_check_job', jobId: params.job_id },
         };
       }
 
-      // Job is done — read output
       try {
         const output = readFileSync(job.outputPath, 'utf-8');
         return {
@@ -203,7 +360,6 @@ export function createRlmCostTool(config: RlmConfig, state: RlmState): AgentTool
         };
       }
 
-      // Parse the full cost file
       let totalCost = 0;
       let totalTokens = 0;
       let entries = 0;
