@@ -35,6 +35,7 @@ import { initRlmState, resetRlmStateForCycle } from './rlm/state.js';
 import { createRlmQueryTool, createRlmCheckJobTool, createRlmCostTool } from './rlm/tools.js';
 import { buildRlmSystemPromptFragment } from './rlm/system-prompt.js';
 import type { RlmState } from './rlm/types.js';
+import { PiAuthProvider } from './pi-auth-provider.js';
 
 /**
  * Behavioral state for the agent (sleeping, ignoring sources, etc.)
@@ -84,6 +85,21 @@ export class ConnectomeAgent {
       return baseFn(model, context, { ...options, ...overrides });
     };
 
+    // Initialize pi auth provider (reads ~/.pi/agent/auth.json for OAuth tokens).
+    // Falls through to ANTHROPIC_API_KEY env var if no auth.json exists.
+    // Skip OAuth when useApiKey is set (for models not on Claude subscription).
+    const skipOAuth = config.useApiKey || !!config.getApiKey;
+    const authProvider = skipOAuth ? undefined : new PiAuthProvider();
+    const resolvedGetApiKey = config.getApiKey ?? authProvider?.getApiKey;
+
+    if (config.useApiKey) {
+      console.log(`[ConnectomeAgent:${config.name}] Using API key auth (useApiKey=true)`);
+    } else if (authProvider?.hasCredentials('anthropic')) {
+      console.log(`[ConnectomeAgent:${config.name}] Using pi OAuth auth (Claude subscription)`);
+    } else if (!config.getApiKey) {
+      console.log(`[ConnectomeAgent:${config.name}] No pi auth.json found — using ANTHROPIC_API_KEY env var`);
+    }
+
     // Initialize the pi-agent with model and optional stream function
     this.piAgent = new Agent({
       initialState: {
@@ -92,6 +108,7 @@ export class ConnectomeAgent {
         systemPrompt: config.systemPrompt ?? '',
       },
       streamFn,
+      getApiKey: resolvedGetApiKey,
     });
 
     // Initialize the VEIL adapters
@@ -122,6 +139,7 @@ export class ConnectomeAgent {
       // model, and tools as the parent (tools evaluated lazily each call).
       this.rlmState.streamFn = streamFn;
       this.rlmState.parentModel = config.model;
+      this.rlmState.getApiKey = this.piAgent.getApiKey;
       this.rlmState.getParentTools = () => {
         const veilTools = this.toolBridge.getAllTools();
         const extraTools = this.config.extraTools ?? [];

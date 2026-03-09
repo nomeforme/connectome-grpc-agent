@@ -9,6 +9,7 @@ export { VEILContextAdapter, type StreamRefWithParent } from './veil-context-ada
 export { VEILToolBridge, toolHandlerToAgentTool } from './veil-tool-bridge.js';
 export { ConnectomeAgent } from './connectome-agent.js';
 export { ConnectomeEffector } from './connectome-effector.js';
+export { PiAuthProvider } from './pi-auth-provider.js';
 
 // Multi-agent routing
 export { ActivationRouter } from './activation-router.js';

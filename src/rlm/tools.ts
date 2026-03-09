@@ -155,6 +155,7 @@ export function createRlmQueryTool(config: RlmConfig, state: RlmState): AgentToo
             systemPrompt,
           },
           streamFn: state.streamFn,
+          getApiKey: state.getApiKey,
         });
 
         // Get parent's tools, filter out rlm_query at max depth

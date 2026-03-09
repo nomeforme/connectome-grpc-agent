@@ -75,6 +75,8 @@ export interface RlmState {
   parentModel?: any;
   /** Parent agent's fully composed system prompt (base + skills + RLM), updated each cycle */
   parentSystemPrompt?: string;
+  /** API key resolver inherited from parent (for OAuth / subscription auth) */
+  getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
 }
 
 // ---------------------------------------------------------------------------

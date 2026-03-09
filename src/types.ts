@@ -95,6 +95,10 @@ export interface ConnectomeAgentConfig extends AgentConfig {
   maxOutputTokens?: number;
   /** RLM (Recursive Sub-Agent) configuration. When set, rlm_query/rlm_check_job/rlm_cost tools are added. */
   rlm?: RlmConfig;
+  /** Custom API key resolver. When set, overrides PiAuthProvider (OAuth from auth.json). */
+  getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+  /** Force API key auth (skip OAuth). Use for models not on Claude subscription (e.g. claude-3-opus). */
+  useApiKey?: boolean;
 }
 
 /**
