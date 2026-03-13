@@ -111,18 +111,10 @@ export class ConnectomeEffector {
     const { streamId, platformContext } = activation;
     const prefix = `[ConnectomeEffector:${this.agent.name}]`;
 
-    // Deduplicate — the agent can only run one cycle at a time.
-    // Reject if ANY stream is currently processing (not just this one).
-    if (this.processingStreams.size > 0) {
-      const busyStreams = [...this.processingStreams].join(', ');
-      console.log(`${prefix} Skipping activation on ${streamId} — agent busy on ${busyStreams}`);
-      if (this.speechRecorder) {
-        this.speechRecorder.recordSpeech('[Busy — still processing a previous request]', {
-          agentId: this.agent.id,
-          agentName: this.agent.name,
-          streamId,
-        }).catch(() => {});
-      }
+    // Per-stream dedup — skip if THIS stream already has an active cycle.
+    // Cross-stream concurrency is allowed (different channels can run in parallel).
+    if (this.processingStreams.has(streamId)) {
+      console.log(`${prefix} Skipping duplicate activation on ${streamId} — already processing`);
       return null;
     }
     this.processingStreams.add(streamId);
