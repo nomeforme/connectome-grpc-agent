@@ -36,13 +36,14 @@ import { cleanSpeechContent } from './utils.js';
  */
 function formatErrorForChat(message: string): string {
   // Try to extract a human-readable message from JSON API errors
-  // e.g. '400 {"type":"error","error":{"type":"...","message":"..."}}'
+  // e.g. '400 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}'
   try {
     const jsonStart = message.indexOf('{');
     if (jsonStart >= 0) {
       const json = JSON.parse(message.slice(jsonStart));
       if (json.error?.message) {
-        return `[Error] ${json.error.message}`;
+        const errType = json.error.type || 'unknown';
+        return `[Anthropic API ${errType}] ${json.error.message}`;
       }
     }
   } catch {}
