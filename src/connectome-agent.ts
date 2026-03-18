@@ -12,7 +12,8 @@
  */
 
 import { Agent } from '@mariozechner/pi-agent-core';
-import { streamSimple } from '@mariozechner/pi-ai';
+import { streamSimple, completeSimple } from '@mariozechner/pi-ai';
+import type { Message as PiMessage, Context as PiContext } from '@mariozechner/pi-ai';
 import type {
   AgentMessage,
   AgentEvent,
@@ -325,24 +326,21 @@ export class ConnectomeAgent {
     this.piAgent.setTools([...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools]);
 
     if (continuation) {
-      // Continuation mode: load all messages and call continue() so the model
-      // resumes from its last assistant turn (prefill/completion style).
-      // The context already contains the bot's previous speech as assistant messages,
-      // so the model sees its own output and continues naturally.
-      this.piAgent.replaceMessages(messages);
-      const messageCountBefore = this.piAgent.state.messages.length;
-      console.log(`[ConnectomeAgent:${this.name}] Continuation mode — resuming from ${messages.length} messages`);
-      await this.piAgent.continue();
-      await this.piAgent.waitForIdle();
-      if (this.piAgent.state.error) {
-        throw new Error(this.piAgent.state.error);
-      }
-      const allMessages = this.piAgent.state.messages;
-      const newMessages = allMessages.slice(messageCountBefore);
-      const content = this.extractTextContent(newMessages);
-      const tokensUsed = this.extractTokenUsage(newMessages);
-      const operations = this.contextAdapter.messagesToVEILOps(newMessages, streamRef);
-      return { content, operations, messages: newMessages, tokensUsed };
+      // Continuation mode: resume from the bot's last assistant turn.
+      //
+      // Two paths:
+      // - Pseudo-prefill (4.5/4.6): CLI framing workaround via completeSimple()
+      // - Direct API prefill (all others): call the Anthropic API directly with
+      //   the last assistant text as a prefill turn. This bypasses pi-ai's
+      //   completeSimple() which mangles the request through middleware that
+      //   doesn't understand prefill (drops content blocks, enables thinking
+      //   incorrectly, etc). The direct call is simple and correct.
+      const modelId = this.config.model?.id ?? '';
+      const needsPseudoPrefill = /claude-(opus|sonnet|haiku)-4[._-](5|6)\b/i.test(modelId)
+        || /claude-4[._-](5|6)\b/i.test(modelId);
+
+      console.log(`[ConnectomeAgent:${this.name}] Continuation mode (${needsPseudoPrefill ? 'pseudo-prefill' : 'direct API prefill'}) model=${modelId}`);
+      return this.runContinuation(messages, streamRef, needsPseudoPrefill);
     }
 
     // Normal mode: split into history + latest user message
@@ -376,6 +374,298 @@ export class ConnectomeAgent {
     const operations = this.contextAdapter.messagesToVEILOps(newMessages, streamRef);
 
     return { content, operations, messages: newMessages, tokensUsed };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Continuation (true prefill + pseudo-prefill for 4.5/4.6)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Run a continuation cycle using completeSimple() directly.
+   * Bypasses pi-agent's tool loop — "m continue" is text-only continuation.
+   *
+   * @param pseudoPrefill - If true, use CLI framing for 4.5/4.6 models
+   */
+  private async runContinuation(
+    messages: AgentMessage[],
+    streamRef?: { streamId: string; streamType?: string },
+    pseudoPrefill: boolean = false,
+  ): Promise<ConnectomeCycleResult> {
+    const prefix = `[ConnectomeAgent:${this.name}]`;
+
+    // Extract the bot's last assistant content and its index
+    let lastAssistantText = '';
+    let lastAssistantIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i] as any;
+      if (msg.role === 'assistant') {
+        const textBlocks = Array.isArray(msg.content)
+          ? msg.content.filter((b: any) => b.type === 'text').map((b: any) => b.text)
+          : [String(msg.content ?? '')];
+        lastAssistantText = textBlocks.join('\n').trim();
+        if (lastAssistantText) {
+          lastAssistantIdx = i;
+          break;
+        }
+      }
+    }
+
+    if (!lastAssistantText) {
+      console.warn(`${prefix} Continuation requested but no prior assistant content found, falling back to prompt`);
+      this.piAgent.replaceMessages(messages);
+      const countBefore = this.piAgent.state.messages.length;
+      await this.piAgent.prompt('Continue.');
+      await this.piAgent.waitForIdle();
+      if (this.piAgent.state.error) throw new Error(this.piAgent.state.error);
+      const newMsgs = this.piAgent.state.messages.slice(countBefore);
+      return {
+        content: this.extractTextContent(newMsgs),
+        operations: this.contextAdapter.messagesToVEILOps(newMsgs, streamRef),
+        messages: newMsgs,
+        tokensUsed: this.extractTokenUsage(newMsgs),
+      };
+    }
+
+    // Build API messages
+    let apiMessages: PiMessage[];
+    let systemPrompt: string | undefined;
+
+    if (pseudoPrefill) {
+      // Pseudo-prefill: CLI framing technique for 4.5/4.6 models that don't
+      // support native API prefill. Uses the exact <cmd> pattern: the model
+      // sees its prior output as the content of a file, then is asked to
+      // output the full file — it repeats the prefix and continues.
+      //
+      // Conversation history is preserved before the CLI sequence so the
+      // model retains context about what it was discussing.
+      const prefixLen = lastAssistantText.length;
+
+      // History: everything before the last assistant message
+      const history = messages.slice(0, lastAssistantIdx) as PiMessage[];
+
+      // Exact <cmd> pattern from pseudo_prefill
+      const pseudoMessages: PiMessage[] = [
+        { role: 'user', content: `<cmd>cut -c 1-${prefixLen} < response.md</cmd>`, timestamp: Date.now() } as any,
+        { role: 'assistant', content: [{ type: 'text', text: lastAssistantText }], timestamp: Date.now() } as any,
+        { role: 'user', content: `<cmd>cat response.md</cmd>`, timestamp: Date.now() } as any,
+      ];
+
+      apiMessages = [...history, ...pseudoMessages];
+      // Append CLI framing instruction to system prompt
+      systemPrompt = this.piAgent.state.systemPrompt + '\n\nCLI inputs are indicated by <cmd> tags';
+      console.log(`${prefix} [PSEUDO-PREFILL] 4.6 mode — prefix=${prefixLen} chars, history=${history.length} msgs, total=${apiMessages.length} msgs`);
+      console.log(`${prefix} [PSEUDO-PREFILL] prefix preview: "${lastAssistantText.substring(0, 80)}..."`);
+      console.log(`${prefix} [PSEUDO-PREFILL] cmd: cut -c 1-${prefixLen} / cat response.md`);
+    } else {
+      // Direct API prefill: bypass pi-ai's completeSimple entirely.
+      // pi-ai's message pipeline (transformMessages, convertMessages) drops content
+      // blocks and enables thinking incorrectly for prefill, producing empty responses.
+      // Instead, call the Anthropic SDK directly with a clean prefill request.
+      return this.runDirectPrefill(messages, lastAssistantText, streamRef);
+    }
+
+    const context: PiContext = {
+      systemPrompt,
+      messages: apiMessages,
+    };
+
+    // Resolve API key
+    const apiKey = this.piAgent.getApiKey
+      ? await this.piAgent.getApiKey(this.config.model.provider)
+      : undefined;
+
+    const response = await completeSimple(this.config.model, context, {
+      maxTokens: this._maxOutputTokens,
+      apiKey,
+    });
+
+    // Extract text content from the response
+    const responseText = response.content
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('');
+
+    // For pseudo-prefill, strip the repeated prefix to get only new content
+    let newContent: string;
+    const prefixRepeated = pseudoPrefill && responseText.startsWith(lastAssistantText);
+    if (prefixRepeated) {
+      newContent = responseText.substring(lastAssistantText.length);
+    } else {
+      newContent = responseText;
+    }
+
+    console.log(`${prefix} [PSEUDO-PREFILL] Response: ${responseText.length} chars total, ${newContent.length} chars new, stopReason=${response.stopReason}, tokens=${response.usage?.totalTokens ?? 0}`);
+    console.log(`${prefix} [PSEUDO-PREFILL] Prefix stripped: ${prefixRepeated}, response preview: "${newContent.substring(0, 100)}..."`);
+
+    const newMessages: AgentMessage[] = [response];
+    const tokensUsed = response.usage?.totalTokens ?? 0;
+    const operations = this.contextAdapter.messagesToVEILOps(newMessages, streamRef);
+
+    return { content: newContent, operations, messages: newMessages, tokensUsed };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Direct API prefill — bypasses pi-ai for clean true-prefill
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Call the Anthropic API directly for true prefill continuation.
+   * Constructs a minimal request with proper user/assistant alternation
+   * ending with the assistant's partial text as prefill.
+   */
+  private async runDirectPrefill(
+    messages: AgentMessage[],
+    prefillText: string,
+    streamRef?: { streamId: string; streamType?: string },
+  ): Promise<ConnectomeCycleResult> {
+    const prefix = `[ConnectomeAgent:${this.name}]`;
+    // @ts-ignore — anthropic SDK is available at runtime via pi-ai's transitive dep
+    const Anthropic = (await import('@anthropic-ai/sdk')).default;
+
+    // Resolve API key
+    const apiKey = this.piAgent.getApiKey
+      ? await this.piAgent.getApiKey(this.config.model.provider)
+      : undefined;
+
+    if (!apiKey) {
+      throw new Error('No API key available for direct prefill');
+    }
+
+    // Determine if OAuth token — requires special headers to work with Anthropic API
+    const isOAuth = apiKey.includes('sk-ant-oat');
+
+    const client = isOAuth
+      ? new Anthropic({
+          apiKey: null as any,
+          authToken: apiKey,
+          dangerouslyAllowBrowser: true,
+          defaultHeaders: {
+            'accept': 'application/json',
+            'anthropic-dangerous-direct-browser-access': 'true',
+            'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
+            'user-agent': 'claude-cli/0.0.0 (external, cli)',
+            'x-app': 'cli',
+          },
+        } as any)
+      : new Anthropic({ apiKey });
+
+    // Build clean messages: convert VEIL context to user/assistant turns
+    // Only keep text content — strip thinking blocks, tool calls, etc.
+    const apiMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+
+    for (const msg of messages) {
+      const m = msg as any;
+      const role = m.role as string;
+      if (role !== 'user' && role !== 'assistant') continue;
+
+      // Extract text content
+      let text = '';
+      if (typeof m.content === 'string') {
+        text = m.content;
+      } else if (Array.isArray(m.content)) {
+        text = m.content
+          .filter((b: any) => b.type === 'text')
+          .map((b: any) => b.text)
+          .join('\n');
+      }
+      if (!text.trim()) continue;
+
+      // Ensure proper alternation — merge consecutive same-role messages
+      if (apiMessages.length > 0 && apiMessages[apiMessages.length - 1].role === role) {
+        apiMessages[apiMessages.length - 1].content += '\n' + text;
+      } else {
+        apiMessages.push({ role: role as 'user' | 'assistant', content: text });
+      }
+    }
+
+    // Ensure messages start with user (API requirement)
+    if (apiMessages.length > 0 && apiMessages[0].role !== 'user') {
+      apiMessages.unshift({ role: 'user', content: '(context)' });
+    }
+
+    // Strip trailing non-assistant messages so the last message is the prefill
+    while (apiMessages.length > 0 && apiMessages[apiMessages.length - 1].role !== 'assistant') {
+      apiMessages.pop();
+    }
+
+    // Trim trailing whitespace from prefill (API rejects it)
+    if (apiMessages.length > 0) {
+      const last = apiMessages[apiMessages.length - 1];
+      last.content = last.content.trimEnd();
+    }
+
+    if (apiMessages.length === 0) {
+      console.warn(`${prefix} [DIRECT-PREFILL] No messages to prefill, falling back to prompt`);
+      this.piAgent.replaceMessages(messages);
+      await this.piAgent.prompt('Continue.');
+      await this.piAgent.waitForIdle();
+      if (this.piAgent.state.error) throw new Error(this.piAgent.state.error);
+      const newMsgs = this.piAgent.state.messages.slice(this.piAgent.state.messages.length - 1);
+      return {
+        content: this.extractTextContent(newMsgs),
+        operations: this.contextAdapter.messagesToVEILOps(newMsgs, streamRef),
+        messages: newMsgs,
+        tokensUsed: this.extractTokenUsage(newMsgs),
+      };
+    }
+
+    console.log(`${prefix} [DIRECT-PREFILL] ${apiMessages.length} messages, last=${apiMessages[apiMessages.length - 1].role}, prefill="${prefillText.substring(0, 80)}..."`);
+
+    // Build request — OAuth requires structured system prompt with Claude Code identity
+    const sysprompt = this.piAgent.state.systemPrompt;
+    const requestPayload: any = {
+      model: this.config.model?.id ?? 'claude-opus-4-20250514',
+      max_tokens: this._maxOutputTokens || 4096,
+      messages: apiMessages,
+    };
+    if (isOAuth) {
+      // OAuth API requires Claude Code identity as first system block
+      const systemBlocks: any[] = [
+        { type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
+      ];
+      if (sysprompt) {
+        systemBlocks.push({ type: 'text', text: sysprompt });
+      }
+      requestPayload.system = systemBlocks;
+    } else if (sysprompt) {
+      requestPayload.system = sysprompt;
+    }
+
+    console.log(`${prefix} [DIRECT-PREFILL] Request: model=${requestPayload.model}, max_tokens=${requestPayload.max_tokens}, msgs=${apiMessages.length}, system=${sysprompt ? sysprompt.length + ' chars' : 'none'}, isOAuth=${isOAuth}`);
+
+    try {
+      var response = await client.messages.create(requestPayload);
+    } catch (err: any) {
+      console.error(`${prefix} [DIRECT-PREFILL] API error: ${err.status} ${err.message}`);
+      // Log the request that failed
+      console.error(`${prefix} [DIRECT-PREFILL] Failed request messages:`, JSON.stringify(apiMessages.slice(-3), null, 2));
+      throw err;
+    }
+
+    const responseText = response.content
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text)
+      .join('');
+
+    const tokensUsed = (response.usage?.input_tokens ?? 0) + (response.usage?.output_tokens ?? 0);
+
+    console.log(`${prefix} [DIRECT-PREFILL] Response: ${responseText.length} chars, stopReason=${response.stop_reason}, tokens=${tokensUsed}`);
+    console.log(`${prefix} [DIRECT-PREFILL] Preview: "${responseText.substring(0, 100)}..."`);
+
+    // Wrap as AgentMessage for downstream processing
+    const newMessages: AgentMessage[] = [{
+      role: 'assistant',
+      content: response.content.map((b: any) => {
+        if (b.type === 'text') return { type: 'text' as const, text: b.text };
+        return b;
+      }),
+      stopReason: response.stop_reason,
+      usage: { input: response.usage?.input_tokens ?? 0, output: response.usage?.output_tokens ?? 0 },
+    } as any];
+
+    const operations = this.contextAdapter.messagesToVEILOps(newMessages, streamRef);
+
+    return { content: responseText, operations, messages: newMessages, tokensUsed };
   }
 
   // ---------------------------------------------------------------------------
