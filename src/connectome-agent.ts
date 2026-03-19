@@ -537,6 +537,9 @@ export class ConnectomeAgent {
       }
       if (!text.trim()) continue;
 
+      // Filter out continuation trigger messages (signal doesn't delete them)
+      if (role === 'user' && /^\s*(<\S+>\s+)?m\s+continue\s*$/i.test(text)) continue;
+
       const participant = role === 'assistant' ? this.name : 'User';
 
       // Merge consecutive assistant messages (chained continuations) into one entry.
