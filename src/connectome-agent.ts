@@ -439,9 +439,23 @@ export class ConnectomeAgent {
   // ---------------------------------------------------------------------------
 
   /**
-   * Create an Anthropic client configured for OAuth or API key auth.
+   * Create an API client for direct prefill calls.
+   * Routes to Anthropic (OAuth or API key) or Bedrock based on model provider.
+   * Both return the same messages.create() interface.
    */
-  private async createAnthropicClient(): Promise<{ client: any; isOAuth: boolean }> {
+  private async createPrefillClient(): Promise<{ client: any; isOAuth: boolean; isBedrock: boolean }> {
+    const provider = this.config.model?.provider ?? 'anthropic';
+
+    if (provider === 'amazon-bedrock') {
+      // @ts-ignore — bedrock SDK available at runtime
+      const { AnthropicBedrock } = await import('@anthropic-ai/bedrock-sdk');
+      const client = new AnthropicBedrock({
+        awsRegion: process.env.AWS_REGION || 'us-east-1',
+      });
+      return { client, isOAuth: false, isBedrock: true };
+    }
+
+    // Anthropic direct (OAuth or API key)
     // @ts-ignore — anthropic SDK is available at runtime via transitive dep
     const Anthropic = (await import('@anthropic-ai/sdk')).default;
 
@@ -470,24 +484,7 @@ export class ConnectomeAgent {
         } as any)
       : new Anthropic({ apiKey });
 
-    return { client, isOAuth };
-  }
-
-  /**
-   * Build the system prompt for direct API calls.
-   * OAuth requires structured format with Claude Code identity.
-   */
-  private buildDirectSystemPrompt(isOAuth: boolean, extraSystem?: string): any {
-    if (isOAuth) {
-      const blocks: any[] = [
-        { type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
-      ];
-      if (extraSystem) {
-        blocks.push({ type: 'text', text: extraSystem });
-      }
-      return blocks;
-    }
-    return extraSystem || undefined;
+    return { client, isOAuth, isBedrock: false };
   }
 
   /**
@@ -508,7 +505,7 @@ export class ConnectomeAgent {
     streamRef?: { streamId: string; streamType?: string },
   ): Promise<ConnectomeCycleResult> {
     const prefix = `[ConnectomeAgent:${this.name}]`;
-    const { client, isOAuth } = await this.createAnthropicClient();
+    const { client, isOAuth, isBedrock } = await this.createPrefillClient();
 
     // Build conversation log from last N VEIL messages with participant labels
     // Uses raw unmerged messages when available (each VEIL frame = one message)
@@ -565,12 +562,16 @@ export class ConnectomeAgent {
     ];
 
     const cliDirective = 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with the output of the command.';
-    const system = [
-      { type: 'text' as const, text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
-      { type: 'text' as const, text: cliDirective },
-    ];
 
-    console.log(`${prefix} [PREFILL] model=${this.config.model?.id}, isOAuth=${isOAuth}, log=${charCount} chars, msgs=${messages.length}, recent=${recentMessages.length}`);
+    // OAuth requires structured system with CC identity; Bedrock/API key use plain string
+    const system = isOAuth
+      ? [
+          { type: 'text' as const, text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
+          { type: 'text' as const, text: cliDirective },
+        ]
+      : cliDirective;
+
+    console.log(`${prefix} [PREFILL] model=${this.config.model?.id}, provider=${isBedrock ? 'bedrock' : 'anthropic'}, isOAuth=${isOAuth}, log=${charCount} chars, msgs=${messages.length}, recent=${recentMessages.length}`);
     console.log(`${prefix} [PREFILL] ---- CONVERSATION LOG ----`);
     console.log(conversationLog);
     console.log(`${prefix} [PREFILL] ---- END LOG ----`);
