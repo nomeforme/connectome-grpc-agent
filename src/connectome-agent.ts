@@ -555,21 +555,34 @@ export class ConnectomeAgent {
     const charCount = conversationLog.length;
 
     // Tail-cut: model outputs only new content (no echo of the log)
-    const apiMessages = [
-      { role: 'user' as const, content: [{ type: 'text' as const, text: `<cmd>cut -c 1-${charCount} < untitled.txt</cmd>` }] },
-      { role: 'assistant' as const, content: [{ type: 'text' as const, text: conversationLog }] },
-      { role: 'user' as const, content: [{ type: 'text' as const, text: `<cmd>cut -c ${charCount + 1}- < untitled.txt</cmd>` }] },
-    ];
-
+    // Bedrock: native prefill (assistant-last). Anthropic: CLI-framed tail-cut.
     const cliDirective = 'The assistant is in CLI simulation mode, and responds to the user\'s CLI commands only with the output of the command.';
 
-    // OAuth requires structured system with CC identity; Bedrock/API key use plain string
-    const system = isOAuth
-      ? [
-          { type: 'text' as const, text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
-          { type: 'text' as const, text: cliDirective },
-        ]
-      : cliDirective;
+    let apiMessages: any[];
+    let system: any;
+
+    if (isBedrock) {
+      // CLI-framed cut with implied large file
+      apiMessages = [
+        { role: 'user' as const, content: `<cmd>cut -c 1-${charCount} < untitled.txt</cmd>` },
+        { role: 'assistant' as const, content: conversationLog },
+        { role: 'user' as const, content: `<cmd>cut -c ${charCount + 1}-50000 < untitled.txt</cmd>` },
+      ];
+      system = cliDirective;
+    } else {
+      // CLI-framed tail-cut — model outputs only new content
+      apiMessages = [
+        { role: 'user' as const, content: [{ type: 'text' as const, text: `<cmd>cut -c 1-${charCount} < untitled.txt</cmd>` }] },
+        { role: 'assistant' as const, content: [{ type: 'text' as const, text: conversationLog }] },
+        { role: 'user' as const, content: [{ type: 'text' as const, text: `<cmd>cut -c ${charCount + 1}- < untitled.txt</cmd>` }] },
+      ];
+      system = isOAuth
+        ? [
+            { type: 'text' as const, text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
+            { type: 'text' as const, text: cliDirective },
+          ]
+        : cliDirective;
+    }
 
     console.log(`${prefix} [PREFILL] model=${this.config.model?.id}, provider=${isBedrock ? 'bedrock' : 'anthropic'}, isOAuth=${isOAuth}, log=${charCount} chars, msgs=${messages.length}, recent=${recentMessages.length}`);
     console.log(`${prefix} [PREFILL] ---- CONVERSATION LOG ----`);
@@ -577,15 +590,20 @@ export class ConnectomeAgent {
     console.log(`${prefix} [PREFILL] ---- END LOG ----`);
 
     try {
-      const response = await client.messages.create({
+      const requestParams: any = {
         model: this.config.model?.id ?? 'claude-opus-4-6',
         max_tokens: this._maxOutputTokens || 4096,
         temperature: 1,
-        thinking: { type: 'disabled' },
-        system,
         messages: apiMessages,
         stop_sequences: ['\nUser:'],
-      });
+      };
+      if (system) requestParams.system = system;
+      // Only send thinking param for models that support it (3.7+, 4.x)
+      const modelId = this.config.model?.id ?? '';
+      const supportsThinking = /claude-(3-7|4|opus-4|sonnet-4|haiku-4)/i.test(modelId);
+      if (!isBedrock && supportsThinking) requestParams.thinking = { type: 'disabled' };
+
+      const response = await client.messages.create(requestParams);
 
       // Tail-cut: response is only new content, no stripping needed
       const newContent = (response as any).content
