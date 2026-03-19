@@ -142,10 +142,14 @@ export interface VEILStateLike {
  * - **Client-side**: gRPC getContext returns pre-rendered conversation → mapped to AgentContext
  */
 export interface AgentContext {
-  /** Conversation messages in pi-agent format */
+  /** Conversation messages in pi-agent format (merged for API compatibility) */
   messages: AgentMessage[];
   /** System prompt for this cycle */
   systemPrompt: string;
+  /** Raw unmerged messages from VEIL — individual per-frame messages before
+   *  consecutive same-role merging. Used by prefill to build conversation logs
+   *  with correct per-message participant labels. */
+  rawMessages?: Array<{ role: string; content: string; metadata?: any }>;
 }
 
 /**
