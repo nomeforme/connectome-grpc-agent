@@ -267,6 +267,8 @@ export class ConnectomeEffector {
       unsub?.();
       if (typingInterval) clearInterval(typingInterval);
       this.processingStreams.delete(streamId);
+      // Reset pi-agent state to prevent stuck "processing" on failed/aborted cycles
+      try { (this.agent as any).piAgent?.reset?.(); } catch { /* ignore */ }
       this.abortedStreams.delete(streamId);
     }
   }

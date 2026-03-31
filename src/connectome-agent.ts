@@ -653,9 +653,12 @@ export class ConnectomeAgent {
 
   /**
    * Abort the current cycle. The pi-agent will stop streaming and tool execution.
+   * Also resets the agent state to clear any stuck "processing" state.
    */
   abort(): void {
     this.piAgent.abort();
+    // Reset clears the stuck "processing" state so the agent can accept new prompts
+    try { this.piAgent.reset(); } catch { /* ignore if already idle */ }
   }
 
   /**
