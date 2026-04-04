@@ -91,6 +91,8 @@ export interface ConnectomeAgentConfig extends AgentConfig {
   streamFn?: (...args: any[]) => any;
   /** Enable prompt caching (default true). Set false for bedrock cross-region models that don't support it. */
   promptCaching?: boolean;
+  /** AWS region override for Bedrock (e.g. "ap-south-1"). Overrides AWS_REGION env var. */
+  awsRegion?: string;
   /** Max output tokens per API call. Overrides model default (model.maxTokens / 3). */
   maxOutputTokens?: number;
   /** RLM (Recursive Sub-Agent) configuration. When set, rlm_query/rlm_check_job/rlm_cost tools are added. */

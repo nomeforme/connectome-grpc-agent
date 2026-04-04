@@ -78,6 +78,7 @@ export class ConnectomeAgent {
     // Build stream function — wrap to inject config overrides (always wrap so maxOutputTokens can be changed at runtime)
     const baseFn = config.streamFn ?? streamSimple;
     const needsCacheOverride = config.promptCaching === false;
+    const regionOverride = config.awsRegion;
     const self = this;
     let streamFn: typeof baseFn | undefined = (model: any, context: any, options?: any) => {
       const overrides: Record<string, any> = {};
@@ -92,6 +93,11 @@ export class ConnectomeAgent {
     const skipOAuth = config.useApiKey || !!config.getApiKey;
     const authProvider = skipOAuth ? undefined : new PiAuthProvider();
     const resolvedGetApiKey = config.getApiKey ?? authProvider?.getApiKey;
+
+    if (regionOverride) {
+      console.log(`[ConnectomeAgent:${config.name}] AWS region override: ${regionOverride}`);
+      process.env.AWS_REGION = regionOverride;
+    }
 
     if (config.useApiKey) {
       console.log(`[ConnectomeAgent:${config.name}] Using API key auth (useApiKey=true)`);
@@ -450,7 +456,7 @@ export class ConnectomeAgent {
       // @ts-ignore — bedrock SDK available at runtime
       const { AnthropicBedrock } = await import('@anthropic-ai/bedrock-sdk');
       const client = new AnthropicBedrock({
-        awsRegion: process.env.AWS_REGION || 'us-east-1',
+        awsRegion: this.config.awsRegion || process.env.AWS_REGION || 'us-east-1',
       });
       return { client, isOAuth: false, isBedrock: true };
     }

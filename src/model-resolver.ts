@@ -16,7 +16,7 @@
 import { getModels } from '@mariozechner/pi-ai';
 import type { Model, Api } from '@mariozechner/pi-ai';
 
-const REGION_PREFIX_RE = /^(us|eu|global)\./;
+const REGION_PREFIX_RE = /^(us|eu|global|apac)\./;
 
 /**
  * Resolve a model name to a pi-ai Model object.
