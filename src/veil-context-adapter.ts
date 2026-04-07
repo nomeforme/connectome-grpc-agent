@@ -233,6 +233,7 @@ export class VEILContextAdapter {
     for (const [, facet] of facets) {
       if (facet.type !== 'ambient') continue;
       if (!facetMatchesStream(facet, streamRef)) continue;
+      if ((facet as any).targetAgentId && (facet as any).targetAgentId !== this.config.agentId) continue;
       if (hasContentAspect(facet) && (facet as any).content) {
         ambientParts.push((facet as any).content as string);
       }
