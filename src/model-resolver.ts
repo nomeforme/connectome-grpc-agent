@@ -18,6 +18,11 @@ import type { Model, Api } from '@mariozechner/pi-ai';
 
 const REGION_PREFIX_RE = /^(us|eu|global|apac)\./;
 
+/** Models not yet in pi-ai's registry — cloned from a base model with overridden ID. */
+const MANUAL_MODELS: Record<string, string> = {
+  'claude-opus-4-7': 'claude-opus-4-6',
+};
+
 /**
  * Resolve a model name to a pi-ai Model object.
  *
@@ -39,6 +44,13 @@ export function resolveModel(modelName: string): Model<Api> | undefined {
     if (baseModel) {
       return { ...baseModel, id: modelName } as Model<Api>;
     }
+  }
+
+  // 3. Manual overrides for models not yet in pi-ai
+  const baseModelName = MANUAL_MODELS[modelName];
+  if (baseModelName) {
+    const base = getModels('anthropic').find((m) => m.id === baseModelName);
+    if (base) return { ...base, id: modelName } as Model<Api>;
   }
 
   return undefined;
