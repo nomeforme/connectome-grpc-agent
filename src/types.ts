@@ -101,6 +101,24 @@ export interface ConnectomeAgentConfig extends AgentConfig {
   getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
   /** Force API key auth (skip OAuth). Use for models not on Claude subscription (e.g. claude-3-opus). */
   useApiKey?: boolean;
+  /** Per-stream pi-agent pool tuning. Each active stream gets its own pi-agent
+   *  instance so cross-stream activations can run truly in parallel without
+   *  racing pi-agent's shared `_state.isStreaming`. */
+  agentPool?: ConnectomeAgentPoolConfig;
+}
+
+/**
+ * Tuning knobs for the per-stream pi-agent pool inside ConnectomeAgent.
+ * All fields optional — defaults aim for ~100MB ceiling at 50 active streams.
+ */
+export interface ConnectomeAgentPoolConfig {
+  /** Idle TTL before a per-stream pi-agent is evicted. Default: 600_000 (10 min). */
+  idleTtlMs?: number;
+  /** Hard cap on simultaneously held pi-agent instances. Beyond this, LRU evict
+   *  the oldest non-busy entry on next spawn. Default: 50. */
+  maxStreams?: number;
+  /** How often the eviction sweep runs. Default: 60_000 (60s). */
+  sweepIntervalMs?: number;
 }
 
 /**
@@ -261,6 +279,11 @@ export interface UnifiedActivation {
 /**
  * Minimal agent interface used by the ConnectomeEffector.
  * Implemented by ConnectomeAgent — avoids circular import with the class.
+ *
+ * Several methods accept an optional `streamId`. When set, the operation
+ * targets just the per-stream pi-agent instance for that stream (cross-stream
+ * parallel cycles each have their own pi-agent state). When omitted, the
+ * operation applies globally — to every active in-flight cycle.
  */
 export interface EffectorAgent {
   readonly id: string;
@@ -274,6 +297,9 @@ export interface EffectorAgent {
    *
    * When continuation is true, the agent resumes from its last assistant
    * message (prefill/completion mode) instead of prompting with a new user message.
+   *
+   * The streamRef.streamId is used as the per-stream pi-agent pool key —
+   * concurrent cycles on different streams use separate pi-agent instances.
    */
   runWithContext(
     context: AgentContext,
@@ -282,23 +308,33 @@ export interface EffectorAgent {
   ): Promise<ConnectomeCycleResult>;
 
   /**
-   * Subscribe to pi-agent events (message_end, turn_end, etc.)
+   * Subscribe to pi-agent events (message_end, turn_end, etc.) for a given stream.
+   * When streamId is omitted, subscribes to events from ALL active streams (broadcast).
    * Returns an unsubscribe function. Optional — not all agents support this.
    */
-  subscribe?(fn: (e: AgentEvent) => void): () => void;
+  subscribe?(fn: (e: AgentEvent) => void, streamId?: string): () => void;
 
   /**
-   * Abort the current cycle. Stops LLM streaming and tool execution.
+   * Abort the current cycle for the given stream, or all in-flight cycles when
+   * streamId is omitted. Stops LLM streaming and tool execution.
    * Optional — not all agents support this.
    */
-  abort?(): void;
+  abort?(streamId?: string): void;
 
   /**
-   * Steer the agent mid-run by injecting a user message into the conversation.
+   * Steer the agent mid-run by injecting a user message into a specific stream's
+   * cycle, or into all in-flight cycles when streamId is omitted.
    * The message is delivered after the current tool execution completes.
    * Optional — not all agents support this.
    */
-  steer?(message: string): void;
+  steer?(message: string, streamId?: string): void;
+
+  /**
+   * Reset per-stream pi-agent state (clears stuck "isStreaming", aborts in-flight,
+   * resets internal queues). Used by the effector to recover from failed cycles.
+   * Optional — not all agents support this.
+   */
+  resetStream?(streamId: string): void;
 }
 
 /**

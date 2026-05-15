@@ -79,7 +79,10 @@ export class ConnectomeEffector {
     id: string; contentType: string; data: string; filename?: string; sizeBytes?: number;
   }>;
 
-  /** Streams currently being processed — prevents parallel cycles on the same stream. */
+  /** Streams currently being processed — prevents back-to-back activations on the
+   *  SAME stream from racing the same per-stream pi-agent's `_state.isStreaming`.
+   *  Cross-stream concurrency is fully native: each stream has its own pi-agent
+   *  instance via the per-stream pool inside ConnectomeAgent. */
   private readonly processingStreams: Set<string> = new Set();
 
   /** Streams where abort was requested — prevents error recording for intentional stops. */
@@ -113,7 +116,9 @@ export class ConnectomeEffector {
     const prefix = `[ConnectomeEffector:${this.agent.name}]`;
 
     // Per-stream dedup — skip if THIS stream already has an active cycle.
-    // Cross-stream concurrency is allowed (different channels can run in parallel).
+    // Each stream owns its own pi-agent instance, so different streams can
+    // run truly in parallel; this guard only suppresses literal same-stream
+    // duplicates (e.g. multiple rapid activations on the same channel).
     if (this.processingStreams.has(streamId)) {
       console.log(`${prefix} Skipping duplicate activation on ${streamId} — already processing`);
       return null;
@@ -148,6 +153,9 @@ export class ConnectomeEffector {
       let turnCount = 0;
 
       if (this.agent.subscribe && this.speechRecorder) {
+        // Subscribe to the per-stream pi-agent so we only see events for THIS
+        // stream's cycle, even if the bot is concurrently running cycles on
+        // other streams.
         unsub = this.agent.subscribe((event: AgentEvent) => {
           if (event.type === 'message_end') {
             turnCount++;
@@ -172,7 +180,7 @@ export class ConnectomeEffector {
               }
             }
           }
-        });
+        }, streamId);
       }
 
       // Run the agent cycle
@@ -267,8 +275,9 @@ export class ConnectomeEffector {
       unsub?.();
       if (typingInterval) clearInterval(typingInterval);
       this.processingStreams.delete(streamId);
-      // Reset pi-agent state to prevent stuck "processing" on failed/aborted cycles
-      try { (this.agent as any).piAgent?.reset?.(); } catch { /* ignore */ }
+      // Reset only THIS stream's pi-agent — prevents stuck "isStreaming" on
+      // failed/aborted cycles without disturbing other streams' in-flight work.
+      try { this.agent.resetStream?.(streamId); } catch { /* ignore */ }
       this.abortedStreams.delete(streamId);
     }
   }

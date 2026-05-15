@@ -20,6 +20,7 @@ import type {
   AgentTool,
   AgentContext,
   ConnectomeAgentConfig,
+  ConnectomeAgentPoolConfig,
   ConnectomeCycleResult,
   OutgoingVEILOperation,
   AgentCommand,
@@ -48,8 +49,36 @@ interface ConnectomeAgentBehaviorState {
   attentionThreshold: number;
 }
 
+/** Per-stream pi-agent pool entry. */
+interface PiAgentEntry {
+  agent: Agent;
+  lastUsedAt: number;
+}
+
+/** Stream key used when no streamRef is provided (e.g. legacy runPiCycle calls). */
+const DEFAULT_STREAM_KEY = '__default__';
+
+const DEFAULT_POOL_CONFIG: Required<ConnectomeAgentPoolConfig> = {
+  idleTtlMs: 10 * 60 * 1000, // 10 minutes
+  maxStreams: 50,
+  sweepIntervalMs: 60 * 1000, // 60s
+};
+
 export class ConnectomeAgent {
-  private piAgent: Agent;
+  /** Per-stream pi-agent instances. The pi-agent's `_state.isStreaming`,
+   *  `_state.messages`, abortController, and listeners are per-stream so
+   *  cross-stream cycles don't collide. */
+  private piAgents: Map<string, PiAgentEntry> = new Map();
+  /** Resolved pi-agent constructor opts — used by lazy spawn. */
+  private piAgentInitialState: { model: any; thinkingLevel: any; systemPrompt: string };
+  private piAgentStreamFn: ((model: any, context: any, options?: any) => any) | undefined;
+  private piAgentGetApiKey: ((provider: string) => Promise<string | undefined> | string | undefined) | undefined;
+  /** Pool tuning + lifecycle. */
+  private poolConfig: Required<ConnectomeAgentPoolConfig>;
+  private poolSweepInterval?: ReturnType<typeof setInterval>;
+  /** Set when pool is being torn down — short-circuits new spawns. */
+  private disposed = false;
+
   private contextAdapter: VEILContextAdapter;
   private toolBridge: VEILToolBridge;
   private config: ConnectomeAgentConfig;
@@ -107,16 +136,20 @@ export class ConnectomeAgent {
       console.log(`[ConnectomeAgent:${config.name}] No pi auth.json found — using ANTHROPIC_API_KEY env var`);
     }
 
-    // Initialize the pi-agent with model and optional stream function
-    this.piAgent = new Agent({
-      initialState: {
-        model: config.model,
-        thinkingLevel: config.thinkingLevel ?? 'off',
-        systemPrompt: config.systemPrompt ?? '',
-      },
-      streamFn,
-      getApiKey: resolvedGetApiKey,
-    });
+    // Capture pi-agent recipe (used by lazy per-stream spawn). We do NOT
+    // construct a default pi-agent up front — the first runWithContext call
+    // materialises one for its streamId.
+    this.piAgentInitialState = {
+      model: config.model,
+      thinkingLevel: config.thinkingLevel ?? 'off',
+      systemPrompt: config.systemPrompt ?? '',
+    };
+    this.piAgentStreamFn = streamFn;
+    this.piAgentGetApiKey = resolvedGetApiKey;
+
+    // Pool config + idle sweep
+    this.poolConfig = { ...DEFAULT_POOL_CONFIG, ...(config.agentPool ?? {}) };
+    this.startPoolSweep();
 
     // Initialize the VEIL adapters
     this.contextAdapter = new VEILContextAdapter({
@@ -138,7 +171,10 @@ export class ConnectomeAgent {
       this.convertedHandlerTools = config.toolHandlers.map(toolHandlerToAgentTool);
     }
 
-    // Initialize RLM (recursive sub-agent) if configured
+    // Initialize RLM (recursive sub-agent) if configured.
+    // RlmState remains shared across streams — concurrent RLM-using cycles
+    // will share counters. This is a known limitation; per-stream RlmState
+    // is a follow-up if it becomes a practical issue.
     if (config.rlm) {
       this.rlmState = initRlmState(config.rlm);
 
@@ -146,7 +182,7 @@ export class ConnectomeAgent {
       // model, and tools as the parent (tools evaluated lazily each call).
       this.rlmState.streamFn = streamFn;
       this.rlmState.parentModel = config.model;
-      this.rlmState.getApiKey = this.piAgent.getApiKey;
+      this.rlmState.getApiKey = this.piAgentGetApiKey;
       this.rlmState.getParentTools = () => {
         const veilTools = this.toolBridge.getAllTools();
         const extraTools = this.config.extraTools ?? [];
@@ -160,6 +196,146 @@ export class ConnectomeAgent {
       ];
       this.rlmPromptFragment = buildRlmSystemPromptFragment(config.rlm, this.rlmState);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-stream pi-agent pool
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Get or lazily create the pi-agent for a given stream. Each stream gets its
+   * own pi-agent instance so concurrent activations on different streams don't
+   * race on pi-agent's shared `_state.isStreaming` / messages / abort controller.
+   *
+   * Updates the entry's lastUsedAt for LRU tracking. Triggers an LRU eviction
+   * if the cap is reached.
+   */
+  private getOrCreatePiAgent(streamId: string): Agent {
+    const key = streamId || DEFAULT_STREAM_KEY;
+    const existing = this.piAgents.get(key);
+    if (existing) {
+      existing.lastUsedAt = Date.now();
+      return existing.agent;
+    }
+
+    // At cap — evict LRU non-busy entry to make room
+    if (this.piAgents.size >= this.poolConfig.maxStreams) {
+      this.evictLru();
+    }
+
+    const agent = new Agent({
+      initialState: { ...this.piAgentInitialState },
+      streamFn: this.piAgentStreamFn,
+      getApiKey: this.piAgentGetApiKey,
+    });
+    this.piAgents.set(key, { agent, lastUsedAt: Date.now() });
+    console.log(
+      `[ConnectomeAgent:${this.name}] pi-agent spawn streamId=${key} (active=${this.piAgents.size})`,
+    );
+    return agent;
+  }
+
+  /** Returns the pi-agent for a stream if it exists — never lazily creates. */
+  private peekPiAgent(streamId: string): Agent | undefined {
+    return this.piAgents.get(streamId || DEFAULT_STREAM_KEY)?.agent;
+  }
+
+  /** True if the pi-agent for this stream is mid-cycle. */
+  private isPiAgentBusy(entry: PiAgentEntry): boolean {
+    return !!(entry.agent as any).state?.isStreaming;
+  }
+
+  /** Evict the least-recently-used non-busy entry. If all are busy, no-op
+   *  (the new entry is still allowed — correctness wins over the cap). */
+  private evictLru(): void {
+    let oldestKey: string | undefined;
+    let oldestTime = Infinity;
+    for (const [key, entry] of this.piAgents) {
+      if (this.isPiAgentBusy(entry)) continue;
+      if (entry.lastUsedAt < oldestTime) {
+        oldestTime = entry.lastUsedAt;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey) {
+      this.disposePiAgentEntry(oldestKey, 'lru-cap');
+    } else {
+      console.warn(
+        `[ConnectomeAgent:${this.name}] pool over cap (${this.piAgents.size}) — all streams busy, allowing growth`,
+      );
+    }
+  }
+
+  /** Sweep idle entries past the TTL. */
+  private sweepIdle(): void {
+    if (this.disposed) return;
+    const now = Date.now();
+    const ttl = this.poolConfig.idleTtlMs;
+    for (const [key, entry] of this.piAgents) {
+      if (this.isPiAgentBusy(entry)) continue;
+      if (now - entry.lastUsedAt > ttl) {
+        this.disposePiAgentEntry(key, 'idle');
+      }
+    }
+  }
+
+  private startPoolSweep(): void {
+    if (this.poolSweepInterval) clearInterval(this.poolSweepInterval);
+    this.poolSweepInterval = setInterval(
+      () => this.sweepIdle(),
+      this.poolConfig.sweepIntervalMs,
+    );
+    // Don't keep the process alive for the sweep interval
+    if (typeof (this.poolSweepInterval as any).unref === 'function') {
+      (this.poolSweepInterval as any).unref();
+    }
+  }
+
+  /** Dispose a single per-stream pi-agent (abort, drop). */
+  private disposePiAgentEntry(streamKey: string, reason: string): void {
+    const entry = this.piAgents.get(streamKey);
+    if (!entry) return;
+    try {
+      entry.agent.abort();
+      (entry.agent as any).reset?.();
+    } catch { /* ignore */ }
+    this.piAgents.delete(streamKey);
+    console.log(
+      `[ConnectomeAgent:${this.name}] pi-agent evict streamId=${streamKey} reason=${reason} (active=${this.piAgents.size})`,
+    );
+  }
+
+  /** Public: dispose a specific stream's pi-agent. */
+  disposeStream(streamId: string): void {
+    this.disposePiAgentEntry(streamId || DEFAULT_STREAM_KEY, 'manual');
+  }
+
+  /** Reset a stream's pi-agent state — clears stuck "isStreaming" after a
+   *  failed cycle so subsequent activations on the same stream don't see
+   *  a wedged agent. Safe no-op if no pi-agent exists for the stream. */
+  resetStream(streamId: string): void {
+    const agent = this.peekPiAgent(streamId);
+    if (!agent) return;
+    try {
+      agent.abort();
+      (agent as any).reset?.();
+    } catch { /* ignore */ }
+  }
+
+  /** Dispose all per-stream pi-agents and stop the sweep. Called on bot shutdown. */
+  dispose(): void {
+    this.disposed = true;
+    if (this.poolSweepInterval) {
+      clearInterval(this.poolSweepInterval);
+      this.poolSweepInterval = undefined;
+    }
+    const keys = Array.from(this.piAgents.keys());
+    for (const key of keys) this.disposePiAgentEntry(key, 'shutdown');
+  }
+
+  /** List currently held per-stream pi-agent keys (observability). */
+  getActiveStreams(): string[] {
+    return Array.from(this.piAgents.keys());
   }
 
   // ---------------------------------------------------------------------------
@@ -218,6 +394,10 @@ export class ConnectomeAgent {
     // Reset RLM per-activation counters (timeout + call count)
     if (this.rlmState) resetRlmStateForCycle(this.rlmState);
 
+    // Resolve per-stream pi-agent (lazy spawn)
+    const streamKey = streamRef?.streamId || DEFAULT_STREAM_KEY;
+    const piAgent = this.getOrCreatePiAgent(streamKey);
+
     // 1. Convert VEIL state to messages
     const messages = this.contextAdapter.renderToMessages(veilState, streamRef);
 
@@ -229,17 +409,17 @@ export class ConnectomeAgent {
     if (this.rlmState) this.rlmState.parentSystemPrompt = systemPrompt;
 
     // 3. Configure pi-agent for this cycle
-    this.piAgent.setSystemPrompt(systemPrompt);
-    this.piAgent.setModel(this.config.model);
+    piAgent.setSystemPrompt(systemPrompt);
+    piAgent.setModel(this.config.model);
 
     if (this.config.thinkingLevel) {
-      this.piAgent.setThinkingLevel(this.config.thinkingLevel);
+      piAgent.setThinkingLevel(this.config.thinkingLevel);
     }
 
     // Combine VEIL-discovered tools, converted handler tools, RLM tools, and extra tools
     const veilTools = this.toolBridge.getAllTools();
     const extraTools = this.config.extraTools ?? [];
-    this.piAgent.setTools([...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools]);
+    piAgent.setTools([...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools]);
 
     // Separate the latest user message from the conversation history.
     // pi-agent.prompt() expects the new input message(s) to be passed as
@@ -249,31 +429,31 @@ export class ConnectomeAgent {
     const { history, userMessage } = this.splitMessages(messages);
 
     // Set the conversation history (everything before the latest user input)
-    this.piAgent.replaceMessages(history);
+    piAgent.replaceMessages(history);
 
     // Record message count before prompting so we can extract new output
-    const messageCountBefore = this.piAgent.state.messages.length;
+    const messageCountBefore = piAgent.state.messages.length;
 
     // 4. Prompt the agent — this runs the full tool loop and resolves when done
     if (userMessage) {
-      await this.piAgent.prompt(userMessage);
+      await piAgent.prompt(userMessage);
     } else {
       // No user message found — pass the full messages as history and
       // use continue() or prompt with an empty nudge
-      this.piAgent.replaceMessages(messages);
-      await this.piAgent.prompt('Continue.');
+      piAgent.replaceMessages(messages);
+      await piAgent.prompt('Continue.');
     }
 
     // 5. Wait for idle (should already be done since prompt() is async, but just in case)
-    await this.piAgent.waitForIdle();
+    await piAgent.waitForIdle();
 
     // Check for errors caught internally by pi-agent
-    if (this.piAgent.state.error) {
-      throw new Error(this.piAgent.state.error);
+    if (piAgent.state.error) {
+      throw new Error(piAgent.state.error);
     }
 
     // 6. Extract new messages
-    const allMessages = this.piAgent.state.messages;
+    const allMessages = piAgent.state.messages;
     const newMessages = allMessages.slice(messageCountBefore);
 
     // 7. Extract text content and token usage from new assistant messages
@@ -315,21 +495,26 @@ export class ConnectomeAgent {
 
     const { messages, systemPrompt } = context;
 
+    // Resolve per-stream pi-agent (lazy spawn). Streams without a streamRef
+    // share DEFAULT_STREAM_KEY which keeps legacy single-stream callers safe.
+    const streamKey = streamRef?.streamId || DEFAULT_STREAM_KEY;
+    const piAgent = this.getOrCreatePiAgent(streamKey);
+
     // Configure pi-agent (append skill descriptions + RLM to system prompt)
     const composedPrompt = systemPrompt + this.skillPromptFragment + this.rlmPromptFragment;
-    this.piAgent.setSystemPrompt(composedPrompt);
-    this.piAgent.setModel(this.config.model);
+    piAgent.setSystemPrompt(composedPrompt);
+    piAgent.setModel(this.config.model);
 
     // Pass composed system prompt to RLM so child agents inherit it
     if (this.rlmState) this.rlmState.parentSystemPrompt = composedPrompt;
 
     if (this.config.thinkingLevel) {
-      this.piAgent.setThinkingLevel(this.config.thinkingLevel);
+      piAgent.setThinkingLevel(this.config.thinkingLevel);
     }
 
     const veilTools = this.toolBridge.getAllTools();
     const extraTools = this.config.extraTools ?? [];
-    this.piAgent.setTools([...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools]);
+    piAgent.setTools([...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools]);
 
     if (continuation) {
       // Continuation mode: resume from the bot's last assistant turn.
@@ -352,26 +537,26 @@ export class ConnectomeAgent {
 
     // Normal mode: split into history + latest user message
     const { history, userMessage } = this.splitMessages(messages);
-    this.piAgent.replaceMessages(history);
+    piAgent.replaceMessages(history);
 
-    const messageCountBefore = this.piAgent.state.messages.length;
+    const messageCountBefore = piAgent.state.messages.length;
 
     if (userMessage) {
-      await this.piAgent.prompt(userMessage);
+      await piAgent.prompt(userMessage);
     } else {
-      this.piAgent.replaceMessages(messages);
-      await this.piAgent.prompt('Continue.');
+      piAgent.replaceMessages(messages);
+      await piAgent.prompt('Continue.');
     }
 
-    await this.piAgent.waitForIdle();
+    await piAgent.waitForIdle();
 
     // Check for errors caught internally by pi-agent
-    if (this.piAgent.state.error) {
-      throw new Error(this.piAgent.state.error);
+    if (piAgent.state.error) {
+      throw new Error(piAgent.state.error);
     }
 
     // Extract new messages
-    const allMessages = this.piAgent.state.messages;
+    const allMessages = piAgent.state.messages;
     const newMessages = allMessages.slice(messageCountBefore);
 
     const content = this.extractTextContent(newMessages);
@@ -420,12 +605,13 @@ export class ConnectomeAgent {
 
     if (!lastAssistantText) {
       console.warn(`${prefix} Continuation requested but no prior assistant content found, falling back to prompt`);
-      this.piAgent.replaceMessages(messages);
-      const countBefore = this.piAgent.state.messages.length;
-      await this.piAgent.prompt('Continue.');
-      await this.piAgent.waitForIdle();
-      if (this.piAgent.state.error) throw new Error(this.piAgent.state.error);
-      const newMsgs = this.piAgent.state.messages.slice(countBefore);
+      const piAgent = this.getOrCreatePiAgent(streamRef?.streamId || DEFAULT_STREAM_KEY);
+      piAgent.replaceMessages(messages);
+      const countBefore = piAgent.state.messages.length;
+      await piAgent.prompt('Continue.');
+      await piAgent.waitForIdle();
+      if (piAgent.state.error) throw new Error(piAgent.state.error);
+      const newMsgs = piAgent.state.messages.slice(countBefore);
       return {
         content: this.extractTextContent(newMsgs),
         operations: this.contextAdapter.messagesToVEILOps(newMsgs, streamRef),
@@ -465,8 +651,8 @@ export class ConnectomeAgent {
     // @ts-ignore — anthropic SDK is available at runtime via transitive dep
     const Anthropic = (await import('@anthropic-ai/sdk')).default;
 
-    const apiKey = this.piAgent.getApiKey
-      ? await this.piAgent.getApiKey(this.config.model.provider)
+    const apiKey = this.piAgentGetApiKey
+      ? await this.piAgentGetApiKey(this.config.model.provider)
       : process.env.ANTHROPIC_API_KEY;
 
     if (!apiKey) {
@@ -648,31 +834,75 @@ export class ConnectomeAgent {
    * Steer the agent mid-run (inject a user message into the conversation).
    * The steering message is delivered after the current tool execution completes,
    * skipping any remaining tool calls in the current batch.
+   *
+   * When streamId is provided, only that stream's pi-agent is steered. When
+   * omitted, every active in-flight pi-agent is steered (legacy behavior).
    */
-  steer(message: string): void {
-    this.piAgent.steer({
-      role: 'user',
-      content: [{ type: 'text', text: message }],
+  steer(message: string, streamId?: string): void {
+    const payload = {
+      role: 'user' as const,
+      content: [{ type: 'text' as const, text: message }],
       timestamp: Date.now(),
-    });
+    };
+    if (streamId !== undefined) {
+      const piAgent = this.peekPiAgent(streamId);
+      if (piAgent) piAgent.steer(payload);
+      return;
+    }
+    for (const entry of this.piAgents.values()) {
+      try { entry.agent.steer(payload); } catch { /* ignore non-streaming */ }
+    }
   }
 
   /**
    * Abort the current cycle. The pi-agent will stop streaming and tool execution.
    * Also resets the agent state to clear any stuck "processing" state.
+   *
+   * When streamId is provided, only that stream's pi-agent is aborted. When
+   * omitted, every active in-flight pi-agent is aborted (legacy behavior —
+   * matches how `!stop` halts everything the bot is doing).
    */
-  abort(): void {
-    this.piAgent.abort();
-    // Reset clears the stuck "processing" state so the agent can accept new prompts
-    try { this.piAgent.reset(); } catch { /* ignore if already idle */ }
+  abort(streamId?: string): void {
+    if (streamId !== undefined) {
+      const piAgent = this.peekPiAgent(streamId);
+      if (!piAgent) return;
+      try { piAgent.abort(); } catch { /* ignore */ }
+      try { (piAgent as any).reset?.(); } catch { /* ignore if already idle */ }
+      return;
+    }
+    for (const entry of this.piAgents.values()) {
+      try { entry.agent.abort(); } catch { /* ignore */ }
+      try { (entry.agent as any).reset?.(); } catch { /* ignore */ }
+    }
   }
 
   /**
    * Subscribe to pi-agent events (for streaming UI updates, logging, etc.)
    * Returns an unsubscribe function.
+   *
+   * When streamId is provided, subscribes only to that stream's pi-agent. The
+   * pi-agent is lazily created if it doesn't exist yet, so the effector can
+   * subscribe BEFORE calling runWithContext for the stream and still receive
+   * events from the cycle that runWithContext kicks off.
+   *
+   * When streamId is omitted, subscribes to events from EVERY currently held
+   * pi-agent (broadcast). New pi-agents created later are NOT auto-subscribed.
+   * Prefer the per-stream form for cycle-scoped event handling.
    */
-  subscribe(fn: (e: AgentEvent) => void): () => void {
-    return this.piAgent.subscribe(fn);
+  subscribe(fn: (e: AgentEvent) => void, streamId?: string): () => void {
+    if (streamId !== undefined) {
+      const piAgent = this.getOrCreatePiAgent(streamId);
+      return piAgent.subscribe(fn);
+    }
+    const unsubs: Array<() => void> = [];
+    for (const entry of this.piAgents.values()) {
+      unsubs.push(entry.agent.subscribe(fn));
+    }
+    return () => {
+      for (const u of unsubs) {
+        try { u(); } catch { /* ignore */ }
+      }
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -797,11 +1027,14 @@ export class ConnectomeAgent {
   }
 
   /**
-   * Access the underlying pi-agent Agent (for advanced usage — streaming
-   * subscriptions, direct message manipulation, etc.)
+   * Access the per-stream pi-agent Agent instance (for advanced usage —
+   * streaming subscriptions, direct message manipulation, etc.)
+   *
+   * When streamId is provided, returns/spawns that stream's pi-agent.
+   * When omitted, returns the default-stream pi-agent (legacy).
    */
-  getPiAgent(): Agent {
-    return this.piAgent;
+  getPiAgent(streamId?: string): Agent {
+    return this.getOrCreatePiAgent(streamId || DEFAULT_STREAM_KEY);
   }
 
   /**
