@@ -21,6 +21,8 @@ const REGION_PREFIX_RE = /^(us|eu|global|apac)\./;
 /** Models not yet in pi-ai's registry — cloned from a base model with overridden ID. */
 const MANUAL_MODELS: Record<string, string> = {
   'claude-opus-4-7': 'claude-opus-4-6',
+  'claude-opus-4-8': 'claude-opus-4-6',
+  'claude-fable-5': 'claude-opus-4-6',
 };
 
 /**
