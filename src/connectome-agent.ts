@@ -113,6 +113,15 @@ export class ConnectomeAgent {
       const overrides: Record<string, any> = {};
       if (needsCacheOverride) overrides.cacheRetention = 'none';
       if (typeof self._maxOutputTokens === 'number') overrides.maxTokens = self._maxOutputTokens;
+      // Vercel AI Gateway: pi-ai's env-key map for "vercel-ai-gateway" reads
+      // AI_GATEWAY_API_KEY. We want a clearer name (VERCEL_AI_GATEWAY_API_KEY)
+      // so the credential is identifiable in env dumps. Inject it as
+      // options.apiKey — pi-ai checks options.apiKey BEFORE falling back to
+      // the env-key map.
+      if (model?.provider === 'vercel-ai-gateway' && !options?.apiKey) {
+        const key = process.env.VERCEL_AI_GATEWAY_API_KEY;
+        if (key) overrides.apiKey = key;
+      }
       return baseFn(model, context, { ...options, ...overrides });
     };
 
