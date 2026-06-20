@@ -20,6 +20,29 @@ import type { AgentContext } from './types.js';
 // ---------------------------------------------------------------------------
 
 /**
+ * Minimal attachment shape accepted by the context adapter.
+ *
+ * Three transport modes (mutually exclusive in practice):
+ *  - `blobId`: sha256 ref into the content-addressed blob store. Must be
+ *    pre-resolved (via {@link resolveAttachmentRefs}) before the message
+ *    reaches the LLM — once resolved, `data` is populated alongside.
+ *  - `data`: inline base64 (legacy, kept for back-compat with historical
+ *    facets that still carry `inline_data`).
+ *  - `url`: external URL (rare).
+ */
+export interface ContextAttachment {
+  id?: string;
+  url?: string;
+  blobId?: string;
+  contentType?: string;
+  name?: string;
+  filename?: string;
+  size?: number;
+  sizeBytes?: number;
+  data?: string;  // base64 encoded
+}
+
+/**
  * Minimal message shape accepted by the context adapter.
  * Both connectome-ts RenderedContext and axon-local RenderedContext satisfy this.
  */
@@ -27,14 +50,7 @@ export interface ContextMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
   metadata?: {
-    attachments?: Array<{
-      id?: string;
-      url?: string;
-      contentType?: string;
-      name?: string;
-      size?: number;
-      data?: string;  // base64 encoded
-    }>;
+    attachments?: ContextAttachment[];
     [key: string]: any;
   };
 }
@@ -176,4 +192,107 @@ export function renderedContextToAgentContext(rendered: RenderedContextLike): Ag
   }
 
   return { messages, systemPrompt };
+}
+
+// ---------------------------------------------------------------------------
+// Blob ref resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Function that resolves a blob id to bytes.
+ * Typically a thin wrapper around ConnectomeClient.getBlob().
+ */
+export type BlobFetcher = (blobId: string) => Promise<{
+  bytes: Uint8Array;
+  contentType: string;
+  filename?: string;
+}>;
+
+/**
+ * Walk a list of messages and resolve any blob-ref attachments to inline data.
+ *
+ * Attachments with `blobId` set and no `data` are fetched via `fetchBlob` and
+ * populated with `data` (base64) so the downstream context-adapter can inline
+ * them as `ImageContent` exactly like the legacy inline path.
+ *
+ * Failed fetches are logged and the attachment is dropped (better than failing
+ * the whole cycle on a missing blob — the LLM just doesn't see that one).
+ *
+ * Caches resolved blobs by id within a single call so the same blob referenced
+ * by multiple messages (e.g. a quoted image) is fetched once.
+ *
+ * @returns A new array of messages with resolved attachments. Input is not mutated.
+ */
+export async function resolveAttachmentRefs(
+  messages: ContextMessage[],
+  fetchBlob: BlobFetcher
+): Promise<ContextMessage[]> {
+  const cache = new Map<string, { bytes: Uint8Array; contentType: string; filename?: string }>();
+
+  const fetchCached = async (blobId: string) => {
+    let result = cache.get(blobId);
+    if (!result) {
+      result = await fetchBlob(blobId);
+      cache.set(blobId, result);
+    }
+    return result;
+  };
+
+  const resolved: ContextMessage[] = [];
+
+  for (const msg of messages) {
+    const attachments = msg.metadata?.attachments;
+    if (!attachments || attachments.length === 0) {
+      resolved.push(msg);
+      continue;
+    }
+
+    const newAttachments: ContextAttachment[] = [];
+    let mutated = false;
+
+    for (const att of attachments) {
+      // Already has inline data — pass through unchanged (legacy path)
+      if (att.data) {
+        newAttachments.push(att);
+        continue;
+      }
+
+      // Has blobId but no data — resolve
+      if (att.blobId) {
+        try {
+          const blob = await fetchCached(att.blobId);
+          mutated = true;
+          newAttachments.push({
+            ...att,
+            contentType: att.contentType || blob.contentType,
+            filename: att.filename || att.name || blob.filename,
+            // Convert bytes → base64 for the inline pipeline
+            data: Buffer.from(blob.bytes).toString('base64'),
+            sizeBytes: att.sizeBytes ?? blob.bytes.length,
+          });
+        } catch (err: any) {
+          console.warn(
+            `[context-adapter] Failed to resolve blob ${att.blobId.substring(0, 12)}...: ${err.message} — dropping attachment`
+          );
+          mutated = true;
+          // Drop unresolvable attachment rather than failing the cycle
+        }
+        continue;
+      }
+
+      // URL-only or no transport mode — pass through
+      newAttachments.push(att);
+    }
+
+    if (mutated) {
+      resolved.push({
+        ...msg,
+        metadata: { ...msg.metadata, attachments: newAttachments }
+      });
+    } else {
+      resolved.push(msg);
+    }
+  }
+
+  return resolved;
 }

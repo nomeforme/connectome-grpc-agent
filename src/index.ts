@@ -15,7 +15,8 @@ export { PiAuthProvider } from './pi-auth-provider.js';
 export { ActivationRouter } from './activation-router.js';
 
 // Context & model utilities
-export { renderedContextToAgentContext } from './context-adapter.js';
+export { renderedContextToAgentContext, resolveAttachmentRefs } from './context-adapter.js';
+export type { BlobFetcher, ContextAttachment } from './context-adapter.js';
 export { resolveModel, resolveGatewayModel } from './model-resolver.js';
 export type { GatewayModelOptions } from './model-resolver.js';
 
