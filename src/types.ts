@@ -199,10 +199,17 @@ export interface SpeechRecorder {
       agentId: string;
       agentName: string;
       streamId: string;
+      /**
+       * Outgoing attachments to ship alongside the speech. Each entry carries
+       * EITHER `blobId` (content-addressed ref into the blob store, preferred)
+       * OR inline `data` (legacy base64). Bytes never travel through pub/sub
+       * broadcasts when blobId is used.
+       */
       attachments?: Array<{
         id: string;
         contentType: string;
-        data: string;          // base64
+        blobId?: string;
+        data?: string;
         filename?: string;
         sizeBytes?: number;
       }>;
@@ -355,8 +362,20 @@ export interface ConnectomeEffectorConfig {
   maxFrames?: number;
   /** Called when an error occurs during a cycle */
   onError?: (error: Error, activation: UnifiedActivation) => void;
-  /** Drain queued attachments after agent cycle completes (e.g. from attach_file tool) */
+  /**
+   * Drain queued attachments after agent cycle completes (e.g. from attach_file tool).
+   *
+   * Each attachment carries EITHER a `blobId` (content-addressed ref into the
+   * blob store, preferred) OR inline `data` (legacy base64). The effector
+   * passes the array through to the speech recorder; downstream consumers
+   * (axons) handle both transport modes.
+   */
   drainAttachments?: () => Array<{
-    id: string; contentType: string; data: string; filename?: string; sizeBytes?: number;
+    id: string;
+    contentType: string;
+    blobId?: string;
+    data?: string;
+    filename?: string;
+    sizeBytes?: number;
   }>;
 }

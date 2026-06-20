@@ -76,7 +76,12 @@ export class ConnectomeEffector {
   private readonly maxFrames: number;
   private readonly onError?: (error: Error, activation: UnifiedActivation) => void;
   private readonly drainAttachments?: () => Array<{
-    id: string; contentType: string; data: string; filename?: string; sizeBytes?: number;
+    id: string;
+    contentType: string;
+    blobId?: string;
+    data?: string;
+    filename?: string;
+    sizeBytes?: number;
   }>;
 
   /** Streams currently being processed — prevents back-to-back activations on the
