@@ -35,6 +35,10 @@ import { cleanSpeechContent } from './utils.js';
  * Extracts human-readable messages from JSON API errors when possible.
  */
 function formatErrorForChat(message: string): string {
+  // Pre-formatted refusal (from anthropic-refusal-capture): pass through as-is.
+  if (message.startsWith('[Refused:') || message.startsWith('[Model stop_reason=')) {
+    return message.length > 500 ? message.slice(0, 500) + '...' : message;
+  }
   // Try to extract a human-readable message from JSON API errors
   // e.g. '400 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}'
   try {

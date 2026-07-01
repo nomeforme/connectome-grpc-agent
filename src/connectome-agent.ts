@@ -38,6 +38,7 @@ import { createRlmQueryTool, createRlmCheckJobTool, createRlmCostTool } from './
 import { buildRlmSystemPromptFragment } from './rlm/system-prompt.js';
 import type { RlmState } from './rlm/types.js';
 import { PiAuthProvider } from './pi-auth-provider.js';
+import { wrapAnthropicWithRefusalCapture } from './anthropic-refusal-capture.js';
 
 /**
  * Behavioral state for the agent (sleeping, ignoring sources, etc.)
@@ -160,7 +161,11 @@ export class ConnectomeAgent {
       thinkingLevel: config.thinkingLevel ?? 'off',
       systemPrompt: config.systemPrompt ?? '',
     };
-    this.piAgentStreamFn = streamFn;
+    // Outer wrap: enrich pi-ai's stripped "An unknown error occurred" (which
+    // is what a mid-stream classifier trip surfaces as) with Anthropic's
+    // real stop_details.category + explanation via a non-streaming replay.
+    // No-op for non-anthropic providers.
+    this.piAgentStreamFn = wrapAnthropicWithRefusalCapture(streamFn as any, resolvedGetApiKey) as any;
     this.piAgentGetApiKey = resolvedGetApiKey;
 
     // Pool config + idle sweep
