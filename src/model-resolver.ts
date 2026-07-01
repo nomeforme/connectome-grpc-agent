@@ -28,6 +28,9 @@ const MANUAL_MODELS: Record<string, string> = {
   'claude-opus-4-7': 'claude-opus-4-6',
   'claude-opus-4-8': 'claude-opus-4-6',
   'claude-fable-5': 'claude-opus-4-6',
+  // Claude Sonnet 5 — live on the Anthropic API but not yet in pi-ai's registry.
+  // Clone capabilities from sonnet-4-6; the request sends the real id "claude-sonnet-5".
+  'claude-sonnet-5': 'claude-sonnet-4-6',
 };
 
 /**
@@ -127,5 +130,58 @@ export function resolveGatewayModel(
         order: opts.order,
       },
     },
+  };
+}
+
+/**
+ * Options for resolveLocalModel.
+ */
+export interface LocalModelOptions {
+  /** Context window of the served model (llama-server -c ÷ --parallel slots). */
+  contextWindow?: number;
+  /** Max output tokens per response. */
+  maxTokens?: number;
+  /** Whether the model emits reasoning (Qwen3 thinking → reasoning_content). */
+  reasoning?: boolean;
+  /** Modalities the model accepts. */
+  input?: ('text' | 'image')[];
+}
+
+/**
+ * Build a pi-ai Model that targets a self-hosted, OpenAI-compatible endpoint
+ * (llama.cpp / llama-server, LM Studio, vLLM, Ollama's /v1, …).
+ *
+ * For the connectome fleet this is a llama-server on the plantoidz GPU box,
+ * addressed by its Tailscale IP (e.g. http://REDACTED-IP:1234/v1). Container →
+ * Tailscale-IP routing works through the host's tailscale interface — use the
+ * raw IP, NOT the MagicDNS name (which does not resolve inside bot containers).
+ *
+ * The provider is tagged `local-llm` so ConnectomeAgent's streamFn injects a
+ * throwaway API key (llama-server ignores auth, but pi-ai's openai-completions
+ * provider requires a non-empty key). Reasoning models that return
+ * `reasoning_content` (Qwen3, DeepSeek-R1) are parsed natively by pi-ai's
+ * openai-completions provider into thinking blocks — no extra handling needed.
+ *
+ * @param id       — model id sent in the request body; match the served model
+ *                   (llama-server /v1/models), e.g. "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf"
+ * @param baseUrl  — OpenAI-compatible base URL, including the /v1 suffix
+ * @param opts     — context window, max tokens, reasoning flag, input modalities
+ */
+export function resolveLocalModel(
+  id: string,
+  baseUrl: string,
+  opts: LocalModelOptions = {},
+): Model<'openai-completions'> {
+  return {
+    id,
+    name: id,
+    api: 'openai-completions',
+    provider: 'local-llm',
+    baseUrl,
+    reasoning: opts.reasoning ?? true,
+    input: opts.input ?? ['text'],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: opts.contextWindow ?? 32_768,
+    maxTokens: opts.maxTokens ?? 8_192,
   };
 }

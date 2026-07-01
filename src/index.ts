@@ -17,8 +17,8 @@ export { ActivationRouter } from './activation-router.js';
 // Context & model utilities
 export { renderedContextToAgentContext, resolveAttachmentRefs } from './context-adapter.js';
 export type { BlobFetcher, ContextAttachment } from './context-adapter.js';
-export { resolveModel, resolveGatewayModel } from './model-resolver.js';
-export type { GatewayModelOptions } from './model-resolver.js';
+export { resolveModel, resolveGatewayModel, resolveLocalModel } from './model-resolver.js';
+export type { GatewayModelOptions, LocalModelOptions } from './model-resolver.js';
 
 // Utilities
 export { cleanSpeechContent, splitMessage } from './utils.js';

@@ -122,6 +122,13 @@ export class ConnectomeAgent {
         const key = process.env.VERCEL_AI_GATEWAY_API_KEY;
         if (key) overrides.apiKey = key;
       }
+      // Local self-hosted OpenAI-compatible endpoints (llama-server / LM Studio /
+      // vLLM over Tailscale) don't authenticate, but pi-ai's openai-completions
+      // provider requires a non-empty key. Inject a throwaway one — override with
+      // LOCAL_LLM_API_KEY for servers started with --api-key.
+      if (model?.provider === 'local-llm' && !options?.apiKey) {
+        overrides.apiKey = process.env.LOCAL_LLM_API_KEY || 'sk-local';
+      }
       return baseFn(model, context, { ...options, ...overrides });
     };
 
