@@ -23,6 +23,34 @@ export type { GatewayModelOptions, LocalModelOptions } from './model-resolver.js
 // Utilities
 export { cleanSpeechContent, splitMessage } from './utils.js';
 
+// TTS (text-to-speech) — provider interface + implementations + factory
+export type {
+  TTSProvider,
+  TTSSynthesisOptions,
+  TTSSynthesisResult,
+  OmniVoiceProviderConfig,
+  TTSProviderConfig,
+} from './tts/index.js';
+export {
+  OmniVoiceTTSProvider,
+  contentTypeForFormat,
+  createTTSProvider,
+} from './tts/index.js';
+
+// Thinking control — per-model adapters for disabling chain-of-thought
+export type {
+  ThinkingControlAdapter,
+  ThinkingControlContext,
+  ApplyResult as ThinkingApplyResult,
+} from './thinking/index.js';
+export {
+  registerThinkingAdapter,
+  resolveThinkingAdapter,
+  applyThinkingDisableToPrompt,
+  listThinkingAdapters,
+  qwenNoThinkAdapter,
+} from './thinking/index.js';
+
 // Skill loader
 export {
   loadSkillsFromPaths,

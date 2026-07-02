@@ -378,4 +378,17 @@ export interface ConnectomeEffectorConfig {
     filename?: string;
     sizeBytes?: number;
   }>;
+  /**
+   * Optional TTS provider. When set, the effector synthesizes audio for the
+   * FINAL speech emission of each cycle (not per-turn) and attaches it as an
+   * audio file to the speech facet — axons deliver it via the same attachment
+   * plumbing as any other file. Synthesis failure never blocks text delivery.
+   *
+   * Runtime toggle: `setTTSEnabled(bool)` (default true when provider is set).
+   * `!tts on|off` on the axon flips it via the same `bot:config` event route
+   * as `!mt`.
+   */
+  ttsProvider?: import('./tts/tts-provider.js').TTSProvider;
+  /** Initial TTS enabled state (default: true if `ttsProvider` set). */
+  ttsEnabled?: boolean;
 }

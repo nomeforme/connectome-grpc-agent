@@ -87,6 +87,8 @@ export class ConnectomeEffector {
     filename?: string;
     sizeBytes?: number;
   }>;
+  private readonly ttsProvider?: import('./tts/tts-provider.js').TTSProvider;
+  private ttsEnabled: boolean;
 
   /** Streams currently being processed — prevents back-to-back activations on the
    *  SAME stream from racing the same per-stream pi-agent's `_state.isStreaming`.
@@ -106,6 +108,30 @@ export class ConnectomeEffector {
     this.maxFrames = config.maxFrames ?? 200;
     this.onError = config.onError;
     this.drainAttachments = config.drainAttachments;
+    this.ttsProvider = config.ttsProvider;
+    // Default enabled iff a provider is supplied. Runtime-toggleable via setTTSEnabled().
+    this.ttsEnabled = config.ttsEnabled ?? Boolean(config.ttsProvider);
+  }
+
+  // ---------------------------------------------------------------------------
+  // TTS runtime toggle
+  // ---------------------------------------------------------------------------
+
+  /** Returns whether TTS is configured for this effector at all. */
+  hasTTS(): boolean {
+    return Boolean(this.ttsProvider);
+  }
+
+  /** Returns whether TTS is currently enabled (may be false even if provider set). */
+  isTTSEnabled(): boolean {
+    return this.ttsEnabled && Boolean(this.ttsProvider);
+  }
+
+  /** Runtime enable/disable (e.g. from `!tts on|off` command). No-op if no provider. */
+  setTTSEnabled(enabled: boolean): void {
+    if (!this.ttsProvider) return;
+    this.ttsEnabled = enabled;
+    console.log(`[ConnectomeEffector:${this.agent.name}] TTS ${enabled ? 'enabled' : 'disabled'}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -210,10 +236,20 @@ export class ConnectomeEffector {
           // Deliver to platform (adapter handles formatting, splitting, sending)
           await this.adapter.deliverSpeech(cleaned, platformContext);
 
+          // TTS synthesis on the final cleaned content — regardless of whether
+          // per-turn already emitted the text. The audio represents the
+          // completed response the user sees; if per-turn emitted first, the
+          // audio rides the follow-up attachments-only recordSpeech below
+          // (same pattern the attach_file tool uses).
+          if (this.isTTSEnabled()) {
+            const audioAttachment = await this.synthesizeSpeechAudio(cleaned, prefix);
+            if (audioAttachment) attachments.push(audioAttachment);
+          }
+
           // Record on server only if per-turn didn't already emit
           // (avoids duplicating the full concatenated output)
           if (this.speechRecorder && !turnEmitted) {
-            console.log(`${prefix} Recording final speech: ${cleaned.length} chars`);
+            console.log(`${prefix} Recording final speech: ${cleaned.length} chars${attachments.length > 0 ? ` (${attachments.length} attachment(s))` : ''}`);
             await this.speechRecorder.recordSpeech(cleaned, {
               agentId: this.agent.id,
               agentName: this.agent.name,
@@ -348,5 +384,50 @@ export class ConnectomeEffector {
   /** Access the underlying agent. */
   getAgent(): EffectorAgent {
     return this.agent;
+  }
+
+  // ---------------------------------------------------------------------------
+  // TTS synthesis helper
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Synthesize TTS audio for a final speech emission and return it shaped
+   * as an inline-data attachment ready to append to the recordSpeech
+   * attachments array. Returns null on any failure (never throws). The
+   * caller is expected to have already checked `isTTSEnabled()`.
+   */
+  private async synthesizeSpeechAudio(
+    text: string,
+    logPrefix: string,
+  ): Promise<{
+    id: string;
+    contentType: string;
+    data: string;
+    filename: string;
+    sizeBytes: number;
+  } | null> {
+    if (!this.ttsProvider) return null;
+    const startedAt = Date.now();
+    try {
+      const result = await this.ttsProvider.synthesize(text);
+      const elapsed = Date.now() - startedAt;
+      const base64 = result.data.toString('base64');
+      console.log(
+        `${logPrefix} TTS attachment ready: ${result.filename} (${result.data.length} bytes, ${result.contentType}) in ${elapsed}ms via ${this.ttsProvider.name}`,
+      );
+      return {
+        id: `tts-${Date.now()}`,
+        contentType: result.contentType,
+        data: base64,
+        filename: result.filename,
+        sizeBytes: result.data.length,
+      };
+    } catch (err: any) {
+      const elapsed = Date.now() - startedAt;
+      console.warn(
+        `${logPrefix} TTS synthesis failed after ${elapsed}ms — shipping text without audio: ${err?.message ?? err}`,
+      );
+      return null;
+    }
   }
 }
