@@ -4,8 +4,8 @@
  * Bridges between connectome-ts VEIL types and pi-agent types.
  */
 
-import type { AgentMessage, AgentTool, AgentEvent, ThinkingLevel } from '@mariozechner/pi-agent-core';
-import type { Model } from '@mariozechner/pi-ai';
+import type { AgentMessage, AgentTool, AgentEvent, ThinkingLevel } from '@earendil-works/pi-agent-core';
+import type { Model } from '@earendil-works/pi-ai';
 import type { Frame, OutgoingVEILOperation, VEILState, StreamRef, Facet } from '@connectome/connectome-ts';
 import type { AgentConfig, AgentState as ConnectomeAgentState, AgentCommand } from '@connectome/connectome-ts';
 import type { RenderedContext } from '@connectome/connectome-ts';

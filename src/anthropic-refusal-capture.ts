@@ -32,7 +32,7 @@ import {
   type Model,
   type Context,
   type StreamOptions,
-} from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-ai';
 
 type StreamFn = (
   model: Model<any>,

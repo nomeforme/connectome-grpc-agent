@@ -25,8 +25,8 @@ import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
 import { dirname, join } from 'path';
 // pi-ai 0.73 moved the OAuth *runtime* exports off the root barrel onto the
 // `/oauth` subpath; the types still live on the root.
-import { getOAuthApiKey } from '@mariozechner/pi-ai/oauth';
-import type { OAuthCredentials } from '@mariozechner/pi-ai';
+import { getOAuthApiKey } from '@earendil-works/pi-ai/oauth';
+import type { OAuthCredentials } from '@earendil-works/pi-ai';
 
 /** Shape of ~/.pi/agent/auth.json — keyed by provider ID */
 type AuthFile = Record<string, OAuthCredentials>;

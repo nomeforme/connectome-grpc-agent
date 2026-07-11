@@ -12,7 +12,7 @@
  * - First-message-must-be-user constraint (required by Bedrock / Claude 3 Sonnet)
  */
 
-import type { Message, UserMessage, AssistantMessage, TextContent, ImageContent } from '@mariozechner/pi-ai';
+import type { Message, UserMessage, AssistantMessage, TextContent, ImageContent } from '@earendil-works/pi-ai';
 import type { AgentContext } from './types.js';
 
 // ---------------------------------------------------------------------------

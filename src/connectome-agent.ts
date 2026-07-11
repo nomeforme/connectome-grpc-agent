@@ -11,8 +11,13 @@
  *   - VEILToolBridge (VEIL facet actions -> AgentTool[])
  */
 
-import { Agent } from '@mariozechner/pi-agent-core';
-import { streamSimple } from '@mariozechner/pi-ai';
+import { Agent } from '@earendil-works/pi-agent-core';
+// pi-ai 0.80 moved stream/streamSimple off the package root onto `/compat`
+// (a strict superset that pi-agent-core itself imports). Importing it also
+// registers the built-in API providers — the root entrypoint no longer self-
+// registers, so this import is load-bearing, not just a name lookup.
+import { streamSimple } from '@earendil-works/pi-ai/compat';
+import type { Message as PiMessage } from '@earendil-works/pi-ai';
 import type {
   AgentMessage,
   AgentEvent,
@@ -57,6 +62,27 @@ interface PiAgentEntry {
 
 /** Stream key used when no streamRef is provided (e.g. legacy runPiCycle calls). */
 const DEFAULT_STREAM_KEY = '__default__';
+
+/**
+ * Narrow pi's AgentMessage[] down to the LLM messages VEIL actually models.
+ *
+ * pi-agent-core 0.80 widened `AgentMessage` to `Message | BashExecutionMessage`:
+ * its bundled shell harness registers a custom message variant (role
+ * "bashExecution") alongside the LLM roles (user/assistant/toolResult).
+ * Connectome never enables that harness, so in practice none appear — but the
+ * type permits them, and VEIL has no concept for one.
+ *
+ * Filter at the seam rather than teaching the VEIL adapter about pi-internal
+ * message kinds: anything that isn't an LLM message is simply not a VEIL event.
+ * If pi grows more custom variants, they get dropped here instead of producing
+ * malformed facets.
+ */
+function toLlmMessages(messages: readonly AgentMessage[]): PiMessage[] {
+  return messages.filter(
+    (m): m is PiMessage =>
+      m?.role === 'user' || m?.role === 'assistant' || m?.role === 'toolResult',
+  );
+}
 
 const DEFAULT_POOL_CONFIG: Required<ConnectomeAgentPoolConfig> = {
   idleTtlMs: 10 * 60 * 1000, // 10 minutes
@@ -549,7 +575,7 @@ export class ConnectomeAgent {
     const tokensUsed = this.extractTokenUsage(newMessages);
 
     // 8. Convert new messages to VEIL operations
-    const operations = this.contextAdapter.messagesToVEILOps(newMessages, streamRef);
+    const operations = this.contextAdapter.messagesToVEILOps(toLlmMessages(newMessages), streamRef);
 
     return {
       content,
@@ -651,7 +677,7 @@ export class ConnectomeAgent {
     const tokensUsed = this.extractTokenUsage(newMessages);
 
     // Convert to VEIL operations
-    const operations = this.contextAdapter.messagesToVEILOps(newMessages, streamRef);
+    const operations = this.contextAdapter.messagesToVEILOps(toLlmMessages(newMessages), streamRef);
 
     return { content, operations, messages: newMessages, tokensUsed };
   }
@@ -702,7 +728,7 @@ export class ConnectomeAgent {
       const newMsgs = piAgent.state.messages.slice(countBefore);
       return {
         content: this.extractTextContent(newMsgs),
-        operations: this.contextAdapter.messagesToVEILOps(newMsgs, streamRef),
+        operations: this.contextAdapter.messagesToVEILOps(toLlmMessages(newMsgs), streamRef),
         messages: newMsgs,
         tokensUsed: this.extractTokenUsage(newMsgs),
       };
@@ -905,7 +931,7 @@ export class ConnectomeAgent {
         usage: { input: (response as any).usage?.input_tokens ?? 0, output: (response as any).usage?.output_tokens ?? 0 },
       } as any];
 
-      const operations = this.contextAdapter.messagesToVEILOps(newMessages, streamRef);
+      const operations = this.contextAdapter.messagesToVEILOps(toLlmMessages(newMessages), streamRef);
       return { content: newContent, operations, messages: newMessages, tokensUsed };
 
     } catch (err: any) {

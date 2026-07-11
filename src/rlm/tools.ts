@@ -16,8 +16,8 @@
 import { Type } from 'typebox';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { Agent } from '@mariozechner/pi-agent-core';
-import type { AgentTool, AgentToolResult, AgentMessage } from '@mariozechner/pi-agent-core';
+import { Agent } from '@earendil-works/pi-agent-core';
+import type { AgentTool, AgentToolResult, AgentMessage } from '@earendil-works/pi-agent-core';
 import type { RlmConfig, RlmState, RlmToolDetails, RlmAsyncJob } from './types.js';
 import { checkGuardrails, parseCostFile } from './guardrails.js';
 

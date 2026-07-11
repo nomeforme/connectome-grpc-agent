@@ -7,7 +7,7 @@
  * so that getAllTools() returns one unified set the LLM can invoke.
  */
 
-import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
+import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
 // pi-ai 0.73 swapped @sinclair/typebox for its successor `typebox` v1. Tool
 // schemas MUST come from the same package pi validates against — see rlm/tools.ts.
 import { Type, type TObject, type TSchema } from 'typebox';

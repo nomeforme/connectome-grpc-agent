@@ -18,35 +18,75 @@
  * openai-completions provider auto-detects Vercel and applies the routing.
  */
 
-import { getModels } from '@mariozechner/pi-ai';
-import type { Model, Api } from '@mariozechner/pi-ai';
+// pi-ai 0.80 moved the static-catalog API (getModels/stream/streamSimple) off the
+// package root onto the `/compat` subpath. compat is a strict superset of the root
+// and is what pi-agent-core itself imports, so it is a safe bridge — but upstream
+// intends to delete it once the ModelManager migration lands, at which point this
+// should move to `createModels()` / `Models.getModels()`.
+import { getModels } from '@earendil-works/pi-ai/compat';
+import type { Model, Api } from '@earendil-works/pi-ai';
 
 const REGION_PREFIX_RE = /^(us|eu|global|apac)\./;
 
-/** Models not yet in pi-ai's registry — cloned from a base model with overridden ID. */
-const MANUAL_MODELS: Record<string, string> = {
-  // NB claude-opus-4-7 used to be cloned from 4-6; pi-ai 0.73's registry now carries
-  // a real entry for it (identical capabilities), so the exact-match lookup wins and
-  // a manual entry here would be dead code.
-  'claude-opus-4-8': 'claude-opus-4-6',
-  'claude-fable-5': 'claude-opus-4-6',
-  // Claude Sonnet 5 — live on the Anthropic API but not yet in pi-ai's registry.
-  // Clone capabilities from sonnet-4-6; the request sends the real id "claude-sonnet-5".
-  'claude-sonnet-5': 'claude-sonnet-4-6',
-};
-
 /**
- * Bedrock models that pi-ai's registry has DROPPED but Bedrock still serves, and
- * which we intentionally keep running. Hand-pinned from pi-ai 0.53's registry so
- * the capability/cost metadata stays truthful rather than being approximated from
- * a newer sibling.
+ * Models the pi-ai catalog no longer ships, which we deliberately keep running.
  *
- * pi-ai 0.73 removed anthropic.claude-3-sonnet-20240229-v1:0 from the bedrock
- * registry. Without this, resolveModel() returns undefined for the claude-3-sonnet
- * bot (`us.anthropic.claude-3-sonnet-20240229-v1:0`) and bot-runtime throws
- * "Model not found" at startup — a crash-loop for an elder we deliberately keep.
+ * pi-ai 0.80 gutted the legacy Claude catalog (anthropic went 23 -> 14 models):
+ * every Claude 3.x entry and several Claude 4 dated snapshots were deleted, on
+ * both `anthropic` and `amazon-bedrock`. The models are still SERVED by the
+ * providers — they were merely dropped from pi's built-in list. Without pinning,
+ * resolveModel() returns undefined and bot-runtime throws "Model not found" at
+ * startup, crash-looping 8 of our bots (claude-3-opus among them, which we keep
+ * intentionally).
+ *
+ * These literals are captured verbatim from pi-ai 0.53's registry — the version
+ * these bots have actually been running on — so cost/context/capability metadata
+ * stays truthful rather than being approximated from a newer sibling.
+ *
+ * `Model` is a plain interface and ProviderId stays open (KnownProvider | string),
+ * so hand-constructing is a supported pattern — it is what resolveGatewayModel and
+ * resolveLocalModel already do.
  */
-const PINNED_BEDROCK_MODELS: Record<string, Model<Api>> = {
+const PINNED_MODELS: Record<string, Model<Api>> = {
+  // ---- anthropic (direct) ----
+  'claude-3-opus-20240229': {
+    id: 'claude-3-opus-20240229',
+    name: 'Claude Opus 3',
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+    contextWindow: 200000,
+    maxTokens: 4096,
+  } as Model<Api>,
+  'claude-3-haiku-20240307': {
+    id: 'claude-3-haiku-20240307',
+    name: 'Claude Haiku 3',
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 0.25, output: 1.25, cacheRead: 0.03, cacheWrite: 0.3 },
+    contextWindow: 200000,
+    maxTokens: 4096,
+  } as Model<Api>,
+  'claude-sonnet-4-20250514': {
+    id: 'claude-sonnet-4-20250514',
+    name: 'Claude Sonnet 4',
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    reasoning: true,
+    input: ['text', 'image'],
+    cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    contextWindow: 200000,
+    maxTokens: 64000,
+  } as Model<Api>,
+
+  // ---- amazon-bedrock ----
   'anthropic.claude-3-sonnet-20240229-v1:0': {
     id: 'anthropic.claude-3-sonnet-20240229-v1:0',
     name: 'Claude Sonnet 3',
@@ -59,13 +99,69 @@ const PINNED_BEDROCK_MODELS: Record<string, Model<Api>> = {
     contextWindow: 200000,
     maxTokens: 4096,
   } as Model<Api>,
+  'anthropic.claude-3-5-sonnet-20240620-v1:0': {
+    id: 'anthropic.claude-3-5-sonnet-20240620-v1:0',
+    name: 'Claude Sonnet 3.5',
+    api: 'bedrock-converse-stream',
+    provider: 'amazon-bedrock',
+    baseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    contextWindow: 200000,
+    maxTokens: 8192,
+  } as Model<Api>,
+  'anthropic.claude-3-5-sonnet-20241022-v2:0': {
+    id: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+    name: 'Claude Sonnet 3.5 v2',
+    api: 'bedrock-converse-stream',
+    provider: 'amazon-bedrock',
+    baseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    contextWindow: 200000,
+    maxTokens: 8192,
+  } as Model<Api>,
+  'anthropic.claude-3-5-haiku-20241022-v1:0': {
+    id: 'anthropic.claude-3-5-haiku-20241022-v1:0',
+    name: 'Claude Haiku 3.5',
+    api: 'bedrock-converse-stream',
+    provider: 'amazon-bedrock',
+    baseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
+    contextWindow: 200000,
+    maxTokens: 8192,
+  } as Model<Api>,
+  'anthropic.claude-3-7-sonnet-20250219-v1:0': {
+    id: 'anthropic.claude-3-7-sonnet-20250219-v1:0',
+    name: 'Claude Sonnet 3.7',
+    api: 'bedrock-converse-stream',
+    provider: 'amazon-bedrock',
+    baseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+    contextWindow: 200000,
+    maxTokens: 8192,
+  } as Model<Api>,
 };
 
-/** Look up a bedrock model, falling back to our pinned entries for ones pi-ai dropped. */
-function findBedrockModel(id: string): Model<Api> | undefined {
-  const fromRegistry = getModels('amazon-bedrock').find((m) => m.id === id);
-  if (fromRegistry) return fromRegistry as Model<Api>;
-  return PINNED_BEDROCK_MODELS[id];
+/**
+ * Registry lookup with the pinned fallback.
+ *
+ * NB the registry is checked FIRST, so if upstream ever restores a model we pick
+ * up their (authoritative) entry — including compat flags we'd have no way to
+ * know about — and the pin quietly becomes dead weight rather than shadowing it.
+ */
+function findModel(provider: 'anthropic' | 'amazon-bedrock', id: string): Model<Api> | undefined {
+  const fromRegistry = getModels(provider).find((m) => m.id === id) as Model<Api> | undefined;
+  if (fromRegistry) return fromRegistry;
+  const pinned = PINNED_MODELS[id];
+  // Guard the pin by provider so an anthropic id can't satisfy a bedrock lookup.
+  return pinned && pinned.provider === provider ? pinned : undefined;
 }
 
 /**
@@ -76,28 +172,26 @@ function findBedrockModel(id: string): Model<Api> | undefined {
  * falls back to the unprefixed base model and clones it with the prefixed ID.
  */
 export function resolveModel(modelName: string): Model<Api> | undefined {
-  // 1. Exact match in anthropic or bedrock registries (bedrock incl. pinned elders)
-  const exact = (getModels('anthropic').find((m) => m.id === modelName) as Model<Api> | undefined)
-    ?? findBedrockModel(modelName);
+  // 1. Exact match — registry first, then our pinned entries for models pi-ai dropped.
+  const exact = findModel('anthropic', modelName) ?? findModel('amazon-bedrock', modelName);
   if (exact) return exact;
 
-  // 2. Cross-region prefix fallback: strip us./eu./global., find base, clone with prefixed ID
+  // 2. Cross-region prefix fallback: strip us./eu./apac./global., find the base
+  //    bedrock model, clone it with the prefixed ID so AWS gets the right identifier.
   const prefixMatch = modelName.match(REGION_PREFIX_RE);
   if (prefixMatch) {
     const baseId = modelName.slice(prefixMatch[0].length);
-    const baseModel = findBedrockModel(baseId);
+    const baseModel = findModel('amazon-bedrock', baseId);
     if (baseModel) {
       return { ...baseModel, id: modelName } as Model<Api>;
     }
   }
 
-  // 3. Manual overrides for models not yet in pi-ai
-  const baseModelName = MANUAL_MODELS[modelName];
-  if (baseModelName) {
-    const base = getModels('anthropic').find((m) => m.id === baseModelName);
-    if (base) return { ...base, id: modelName } as Model<Api>;
-  }
-
+  // NB there is no longer a MANUAL_MODELS clone step: claude-opus-4-7/4-8,
+  // claude-fable-5 and claude-sonnet-5 are all real entries in pi-ai 0.80's
+  // catalog now, so they resolve at step 1 — and crucially they carry compat
+  // flags (e.g. forceAdaptiveThinking, supportsTemperature: false on 4-8/Fable)
+  // that a hand-rolled clone of an older sibling would have silently omitted.
   return undefined;
 }
 

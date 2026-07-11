@@ -1,7 +1,7 @@
 {
   "name": "@connectome/agent-core",
   "version": "0.1.0",
-  "description": "Connectome agent core — pi-agent wrapped in VEIL-native agents",
+  "description": "Connectome agent core \u2014 pi-agent wrapped in VEIL-native agents",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -21,8 +21,8 @@
     "@anthropic-ai/bedrock-sdk": "^0.26.4",
     "@anthropic-ai/sdk": "0.61.0",
     "@connectome/connectome-ts": "workspace:*",
-    "@mariozechner/pi-agent-core": "^0.73.1",
-    "@mariozechner/pi-ai": "^0.73.1",
+    "@earendil-works/pi-agent-core": "^0.80.6",
+    "@earendil-works/pi-ai": "^0.80.6",
     "typebox": "^1.1.24"
   },
   "devDependencies": {

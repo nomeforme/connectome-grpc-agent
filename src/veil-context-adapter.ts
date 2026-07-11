@@ -15,7 +15,7 @@ import type {
   ImageContent,
   ThinkingContent,
   ToolCall,
-} from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-ai';
 
 import type {
   Frame,
