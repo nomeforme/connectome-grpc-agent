@@ -102,40 +102,75 @@ export class PiAuthProvider {
       return undefined; // no OAuth creds → fall through to ANTHROPIC_API_KEY env var
     }
 
-    let result: Awaited<ReturnType<typeof getOAuthApiKey>>;
-    try {
-      result = await getOAuthApiKey(provider, creds);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      if (strict) {
-        throw new OAuthUnavailableError(
-          `OAuth token refresh failed for '${provider}': ${detail}. ` +
-            `This bot is configured to use the Claude subscription — refusing to fall back to ` +
-            `ANTHROPIC_API_KEY. Run \`pi login\` on the host to re-authenticate.`,
-        );
-      }
-      console.warn(`[PiAuthProvider] OAuth token refresh failed for ${provider}: ${detail}`);
-      return undefined; // fall through to env var
+    const first = await this.tryResolve(provider, creds);
+    if (first.ok) return first.apiKey;
+
+    // ── Rotation race ────────────────────────────────────────────────────────
+    // Every bot container bind-mounts the SAME ~/.pi/agent/auth.json, and each
+    // holds its own 30s cache of it. When the access token expires, they all try
+    // to refresh at once with the same refresh token. Anthropic ROTATES the
+    // refresh token, so exactly one wins and the rest present an already-rotated
+    // token and get `invalid_grant`.
+    //
+    // That is not a dead credential — the winner has just written a fresh one to
+    // disk. So before failing, drop the cache, re-read the file, and retry once
+    // with whatever is there now. Without this, ~19 of 20 bots would throw in
+    // unison every time the token rolls over.
+    const reloaded = this.loadCredentials(true);
+    const rotated =
+      reloaded?.[provider] && reloaded[provider] !== creds[provider] ? reloaded : undefined;
+
+    if (rotated) {
+      console.warn(
+        `[PiAuthProvider] OAuth resolve failed for ${provider} (${first.reason}) — ` +
+          `auth.json changed on disk (another process refreshed); retrying with the new credentials`,
+      );
+      const second = await this.tryResolve(provider, rotated);
+      if (second.ok) return second.apiKey;
+      return this.fail(provider, second.reason, strict);
     }
 
-    if (!result) {
-      if (strict) {
-        throw new OAuthUnavailableError(
-          `OAuth provider '${provider}' returned no token (unknown provider or unusable credentials). ` +
-            `Refusing to fall back to ANTHROPIC_API_KEY. Run \`pi login\` on the host.`,
-        );
-      }
-      return undefined;
-    }
-
-    // Write back refreshed credentials if they changed
-    if (result.newCredentials !== creds[provider]) {
-      creds[provider] = result.newCredentials;
-      this.saveCredentials(creds);
-    }
-
-    return result.apiKey;
+    return this.fail(provider, first.reason, strict);
   };
+
+  /**
+   * One resolution attempt. Never throws — reports the reason so the caller can
+   * decide between retrying (rotation race) and failing.
+   */
+  private async tryResolve(
+    provider: string,
+    creds: AuthFile,
+  ): Promise<{ ok: true; apiKey: string } | { ok: false; reason: string }> {
+    try {
+      const result = await getOAuthApiKey(provider, creds);
+      if (!result) {
+        return { ok: false, reason: 'provider returned no token (unknown provider or unusable credentials)' };
+      }
+      // Persist rotated credentials. Atomic (tmp + rename), so a concurrent
+      // reader never sees a torn file.
+      if (result.newCredentials !== creds[provider]) {
+        creds[provider] = result.newCredentials;
+        this.saveCredentials(creds);
+      }
+      return { ok: true, apiKey: result.apiKey };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** Strict → throw with a fix-it message; lenient → warn and fall through to env. */
+  private fail(provider: string, reason: string, strict: boolean): undefined {
+    if (strict) {
+      throw new OAuthUnavailableError(
+        `Could not obtain an OAuth token for '${provider}': ${reason}. ` +
+          `This bot is configured to use the Claude subscription — refusing to fall back to ` +
+          `ANTHROPIC_API_KEY. Run \`pi login\` on the host to re-authenticate, or set ` +
+          `"use_api_key": true for this bot if it is meant to run on the API.`,
+      );
+    }
+    console.warn(`[PiAuthProvider] OAuth unavailable for ${provider}: ${reason} — falling back to env var`);
+    return undefined;
+  }
 
   /**
    * Check if auth.json has credentials for a provider.
@@ -171,9 +206,13 @@ export class PiAuthProvider {
   // Private
   // ---------------------------------------------------------------------------
 
-  private loadCredentials(): AuthFile | null {
+  /**
+   * @param force Bypass the cache and re-read from disk. Used after a failed
+   *   resolve to pick up credentials another container just rotated in.
+   */
+  private loadCredentials(force = false): AuthFile | null {
     // Cache: don't re-read file on every API call
-    if (this.credentials && Date.now() - this.lastLoadTime < this.reloadIntervalMs) {
+    if (!force && this.credentials && Date.now() - this.lastLoadTime < this.reloadIntervalMs) {
       return this.credentials;
     }
 
