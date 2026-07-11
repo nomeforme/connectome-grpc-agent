@@ -25,13 +25,48 @@ const REGION_PREFIX_RE = /^(us|eu|global|apac)\./;
 
 /** Models not yet in pi-ai's registry — cloned from a base model with overridden ID. */
 const MANUAL_MODELS: Record<string, string> = {
-  'claude-opus-4-7': 'claude-opus-4-6',
+  // NB claude-opus-4-7 used to be cloned from 4-6; pi-ai 0.73's registry now carries
+  // a real entry for it (identical capabilities), so the exact-match lookup wins and
+  // a manual entry here would be dead code.
   'claude-opus-4-8': 'claude-opus-4-6',
   'claude-fable-5': 'claude-opus-4-6',
   // Claude Sonnet 5 — live on the Anthropic API but not yet in pi-ai's registry.
   // Clone capabilities from sonnet-4-6; the request sends the real id "claude-sonnet-5".
   'claude-sonnet-5': 'claude-sonnet-4-6',
 };
+
+/**
+ * Bedrock models that pi-ai's registry has DROPPED but Bedrock still serves, and
+ * which we intentionally keep running. Hand-pinned from pi-ai 0.53's registry so
+ * the capability/cost metadata stays truthful rather than being approximated from
+ * a newer sibling.
+ *
+ * pi-ai 0.73 removed anthropic.claude-3-sonnet-20240229-v1:0 from the bedrock
+ * registry. Without this, resolveModel() returns undefined for the claude-3-sonnet
+ * bot (`us.anthropic.claude-3-sonnet-20240229-v1:0`) and bot-runtime throws
+ * "Model not found" at startup — a crash-loop for an elder we deliberately keep.
+ */
+const PINNED_BEDROCK_MODELS: Record<string, Model<Api>> = {
+  'anthropic.claude-3-sonnet-20240229-v1:0': {
+    id: 'anthropic.claude-3-sonnet-20240229-v1:0',
+    name: 'Claude Sonnet 3',
+    api: 'bedrock-converse-stream',
+    provider: 'amazon-bedrock',
+    baseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+    reasoning: false,
+    input: ['text', 'image'],
+    cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 200000,
+    maxTokens: 4096,
+  } as Model<Api>,
+};
+
+/** Look up a bedrock model, falling back to our pinned entries for ones pi-ai dropped. */
+function findBedrockModel(id: string): Model<Api> | undefined {
+  const fromRegistry = getModels('amazon-bedrock').find((m) => m.id === id);
+  if (fromRegistry) return fromRegistry as Model<Api>;
+  return PINNED_BEDROCK_MODELS[id];
+}
 
 /**
  * Resolve a model name to a pi-ai Model object.
@@ -41,16 +76,16 @@ const MANUAL_MODELS: Record<string, string> = {
  * falls back to the unprefixed base model and clones it with the prefixed ID.
  */
 export function resolveModel(modelName: string): Model<Api> | undefined {
-  // 1. Exact match in anthropic or bedrock registries
-  const exact = getModels('anthropic').find((m) => m.id === modelName)
-    ?? getModels('amazon-bedrock').find((m) => m.id === modelName);
+  // 1. Exact match in anthropic or bedrock registries (bedrock incl. pinned elders)
+  const exact = (getModels('anthropic').find((m) => m.id === modelName) as Model<Api> | undefined)
+    ?? findBedrockModel(modelName);
   if (exact) return exact;
 
   // 2. Cross-region prefix fallback: strip us./eu./global., find base, clone with prefixed ID
   const prefixMatch = modelName.match(REGION_PREFIX_RE);
   if (prefixMatch) {
     const baseId = modelName.slice(prefixMatch[0].length);
-    const baseModel = getModels('amazon-bedrock').find((m) => m.id === baseId);
+    const baseModel = findBedrockModel(baseId);
     if (baseModel) {
       return { ...baseModel, id: modelName } as Model<Api>;
     }

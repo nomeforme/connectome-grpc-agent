@@ -7,7 +7,13 @@
  * 3. rlm_cost — report cost/token usage
  */
 
-import { Type } from '@sinclair/typebox';
+// pi-ai 0.73 swapped @sinclair/typebox for its successor `typebox` v1. Tool
+// schemas MUST come from the same package pi validates against: legacy sinclair
+// schemas still satisfy the type constraint (TSchema is an empty interface) but
+// pi's new typebox-based validator silently loses argument coercion for them —
+// e.g. a model emitting "3" for a Type.Number() would start throwing instead of
+// being coerced to 3.
+import { Type } from 'typebox';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Agent } from '@mariozechner/pi-agent-core';
@@ -122,10 +128,14 @@ export function createRlmQueryTool(config: RlmConfig, state: RlmState): AgentToo
     }),
     execute: async (
       _toolCallId: string,
-      params: { prompt: string; fork?: boolean; async?: boolean; context?: string },
+      // typebox v1 resolves Static<any> to `unknown`, so pi hands params in as
+      // unknown. It has already validated them against `parameters` above, so
+      // narrowing here is sound.
+      rawParams: unknown,
       signal?: AbortSignal,
       onUpdate?: (partialResult: AgentToolResult<RlmToolDetails>) => void,
     ): Promise<AgentToolResult<RlmToolDetails>> => {
+      const params = rawParams as { prompt: string; fork?: boolean; async?: boolean; context?: string };
       // Pre-flight guardrail check
       const guardrailError = checkGuardrails(config, state);
       if (guardrailError) {
@@ -164,7 +174,7 @@ export function createRlmQueryTool(config: RlmConfig, state: RlmState): AgentToo
         const childTools = childAtMaxDepth
           ? parentTools.filter((t: AgentTool) => t.name !== 'rlm_query')
           : parentTools;
-        childAgent.setTools(childTools);
+        childAgent.state.tools = childTools;
 
         // Stream partial output if callback provided
         let unsub: (() => void) | undefined;
@@ -233,8 +243,8 @@ export function createRlmQueryTool(config: RlmConfig, state: RlmState): AgentToo
           cost: { cost: 0, tokens: totalTokens, calls: 1 },
         };
 
-        if (childAgent.state.error) {
-          details.error = childAgent.state.error;
+        if (childAgent.state.errorMessage) {
+          details.error = childAgent.state.errorMessage;
         }
 
         return {
@@ -269,8 +279,10 @@ export function createRlmCheckJobTool(_config: RlmConfig, state: RlmState): Agen
     }),
     execute: async (
       _toolCallId: string,
-      params: { job_id: string },
+      // See rlm_query: typebox v1 gives `unknown`; pi validated it already.
+      rawParams: unknown,
     ): Promise<AgentToolResult<RlmToolDetails>> => {
+      const params = rawParams as { job_id: string };
       const job = state.asyncJobs.get(params.job_id);
 
       if (!job) {

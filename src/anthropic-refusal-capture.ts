@@ -95,9 +95,14 @@ export function wrapAnthropicWithRefusalCapture(
     const originalOnPayload = options?.onPayload;
     const wrappedOptions: any = {
       ...(options ?? {}),
-      onPayload: (payload: unknown) => {
+      // pi-ai 0.73 changed this hook: it now receives (payload, model), and a
+      // NON-UNDEFINED return value REPLACES the outgoing provider payload.
+      // We only observe — never rewrite — so we must not return anything of our
+      // own. Delegating to the upstream hook preserves any replacement IT makes
+      // (and yields undefined when there is no upstream hook).
+      onPayload: (payload: unknown, payloadModel: any) => {
         capturedParams = payload;
-        originalOnPayload?.(payload);
+        return originalOnPayload?.(payload, payloadModel);
       },
     };
 

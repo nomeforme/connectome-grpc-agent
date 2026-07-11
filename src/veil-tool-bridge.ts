@@ -8,7 +8,9 @@
  */
 
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
-import { Type, type TObject, type TSchema } from '@sinclair/typebox';
+// pi-ai 0.73 swapped @sinclair/typebox for its successor `typebox` v1. Tool
+// schemas MUST come from the same package pi validates against — see rlm/tools.ts.
+import { Type, type TObject, type TSchema } from 'typebox';
 import type { Facet, ActionDefinitionFacet } from '@connectome/connectome-ts';
 import type { ToolHandler } from './types.js';
 

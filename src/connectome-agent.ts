@@ -13,7 +13,6 @@
 
 import { Agent } from '@mariozechner/pi-agent-core';
 import { streamSimple } from '@mariozechner/pi-ai';
-import type { Message as PiMessage, Context as PiContext } from '@mariozechner/pi-ai';
 import type {
   AgentMessage,
   AgentEvent,
@@ -74,6 +73,14 @@ export class ConnectomeAgent {
   private piAgentInitialState: { model: any; thinkingLevel: any; systemPrompt: string };
   private piAgentStreamFn: ((model: any, context: any, options?: any) => any) | undefined;
   private piAgentGetApiKey: ((provider: string) => Promise<string | undefined> | string | undefined) | undefined;
+  /**
+   * Set only for bots relying on Claude-subscription OAuth. Strict, so it throws
+   * instead of letting pi fall through to ANTHROPIC_API_KEY. Undefined for
+   * use_api_key / custom-resolver / bedrock / gateway / local-llm bots.
+   */
+  private authProvider: PiAuthProvider | undefined;
+  /** True when this bot's credentials come from the Claude subscription. */
+  private oauthMode = false;
   /** Pool tuning + lifecycle. */
   private poolConfig: Required<ConnectomeAgentPoolConfig>;
   private poolSweepInterval?: ReturnType<typeof setInterval>;
@@ -134,11 +141,25 @@ export class ConnectomeAgent {
     };
 
     // Initialize pi auth provider (reads ~/.pi/agent/auth.json for OAuth tokens).
-    // Falls through to ANTHROPIC_API_KEY env var if no auth.json exists.
-    // Skip OAuth when useApiKey is set (for models not on Claude subscription).
-    const skipOAuth = config.useApiKey || !!config.getApiKey;
-    const authProvider = skipOAuth ? undefined : new PiAuthProvider();
-    const resolvedGetApiKey = config.getApiKey ?? authProvider?.getApiKey;
+    //
+    // A bot is in OAUTH MODE only if it relies on the Claude subscription:
+    //   - no explicit `useApiKey`
+    //   - no custom getApiKey resolver
+    //   - and the model actually talks to the 'anthropic' provider
+    //
+    // The provider check matters: bedrock / vercel-ai-gateway / local-llm bots
+    // authenticate by other means entirely (AWS SigV4, gateway key, local key), so
+    // they must never be subjected to the OAuth requirement even if someone forgets
+    // `use_api_key`. The old `skipOAuth` test was provider-blind and attached a
+    // PiAuthProvider to those bots too.
+    const provider = (config.model as any)?.provider ?? 'anthropic';
+    const oauthMode = !config.useApiKey && !config.getApiKey && provider === 'anthropic';
+
+    // Strict: OAuth-mode bots throw rather than silently falling back to
+    // ANTHROPIC_API_KEY (which previously burned API credit unnoticed).
+    this.authProvider = oauthMode ? new PiAuthProvider({ strict: true }) : undefined;
+    this.oauthMode = oauthMode;
+    const resolvedGetApiKey = config.getApiKey ?? this.authProvider?.getApiKey;
 
     if (regionOverride) {
       console.log(`[ConnectomeAgent:${config.name}] AWS region override: ${regionOverride}`);
@@ -147,10 +168,14 @@ export class ConnectomeAgent {
 
     if (config.useApiKey) {
       console.log(`[ConnectomeAgent:${config.name}] Using API key auth (useApiKey=true)`);
-    } else if (authProvider?.hasCredentials('anthropic')) {
-      console.log(`[ConnectomeAgent:${config.name}] Using pi OAuth auth (Claude subscription)`);
-    } else if (!config.getApiKey) {
-      console.log(`[ConnectomeAgent:${config.name}] No pi auth.json found — using ANTHROPIC_API_KEY env var`);
+    } else if (config.getApiKey) {
+      console.log(`[ConnectomeAgent:${config.name}] Using custom getApiKey resolver`);
+    } else if (oauthMode) {
+      // Deliberately does NOT claim success here — presence of a credential is not
+      // proof it works. assertAuthReady() performs the real check before traffic.
+      console.log(`[ConnectomeAgent:${config.name}] OAuth mode (Claude subscription) — validating…`);
+    } else {
+      console.log(`[ConnectomeAgent:${config.name}] Provider '${provider}' — using provider-native auth`);
     }
 
     // Capture pi-agent recipe (used by lazy per-stream spawn). We do NOT
@@ -220,6 +245,42 @@ export class ConnectomeAgent {
   }
 
   // ---------------------------------------------------------------------------
+  // Auth
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Boot-time auth check. Throws if this bot relies on Claude-subscription OAuth
+   * and that OAuth cannot produce a usable token (missing creds, dead refresh
+   * token, unreadable auth.json).
+   *
+   * Call this before serving any traffic. Without it, an expired subscription
+   * silently degrades to the ANTHROPIC_API_KEY env var and bills the API account
+   * — which is exactly how a dead token went unnoticed for three weeks.
+   *
+   * No-op for bots that don't use OAuth (use_api_key, custom resolver, bedrock,
+   * vercel gateway, local-llm) — they are unaffected by design.
+   *
+   * The check is a real token resolution (performing a refresh if the access
+   * token is expired), not an `expires` comparison: an expired access token with
+   * a live refresh token is the normal steady state and must NOT be treated as
+   * failure.
+   */
+  async assertAuthReady(): Promise<void> {
+    if (!this.oauthMode || !this.authProvider) return;
+
+    const result = await this.authProvider.validate('anthropic');
+    if (!result.ok) {
+      throw new Error(
+        `[${this.config.name}] Claude subscription OAuth is not usable: ${result.reason}\n` +
+          `Refusing to start: falling back to ANTHROPIC_API_KEY would silently bill the API ` +
+          `account. Fix by running \`pi login\` on the host, or set "use_api_key": true for ` +
+          `this bot in bot-runtime/config.json if it is meant to run on the API.`,
+      );
+    }
+    console.log(`[ConnectomeAgent:${this.config.name}] OAuth validated (Claude subscription)`);
+  }
+
+  // ---------------------------------------------------------------------------
   // Per-stream pi-agent pool
   // ---------------------------------------------------------------------------
 
@@ -248,6 +309,12 @@ export class ConnectomeAgent {
       initialState: { ...this.piAgentInitialState },
       streamFn: this.piAgentStreamFn,
       getApiKey: this.piAgentGetApiKey,
+      // pi-agent-core 0.73 changed the default to 'parallel' (tools in a batch run
+      // concurrently, results emitted in completion order). Connectome's VEIL tools
+      // have ordering-sensitive side effects — speech emission, stream actions — and
+      // the effector reconstructs turn order from message sequence, so keep the 0.53
+      // sequential semantics. Revisit deliberately if we want the concurrency.
+      toolExecution: 'sequential',
     });
     this.piAgents.set(key, { agent, lastUsedAt: Date.now() });
     console.log(
@@ -430,17 +497,17 @@ export class ConnectomeAgent {
     if (this.rlmState) this.rlmState.parentSystemPrompt = systemPrompt;
 
     // 3. Configure pi-agent for this cycle
-    piAgent.setSystemPrompt(systemPrompt);
-    piAgent.setModel(this.config.model);
+    piAgent.state.systemPrompt = systemPrompt;
+    piAgent.state.model = this.config.model;
 
     if (this.config.thinkingLevel) {
-      piAgent.setThinkingLevel(this.config.thinkingLevel);
+      piAgent.state.thinkingLevel = this.config.thinkingLevel;
     }
 
     // Combine VEIL-discovered tools, converted handler tools, RLM tools, and extra tools
     const veilTools = this.toolBridge.getAllTools();
     const extraTools = this.config.extraTools ?? [];
-    piAgent.setTools([...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools]);
+    piAgent.state.tools = [...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools];
 
     // Separate the latest user message from the conversation history.
     // pi-agent.prompt() expects the new input message(s) to be passed as
@@ -450,7 +517,7 @@ export class ConnectomeAgent {
     const { history, userMessage } = this.splitMessages(messages);
 
     // Set the conversation history (everything before the latest user input)
-    piAgent.replaceMessages(history);
+    piAgent.state.messages = history;
 
     // Record message count before prompting so we can extract new output
     const messageCountBefore = piAgent.state.messages.length;
@@ -461,7 +528,7 @@ export class ConnectomeAgent {
     } else {
       // No user message found — pass the full messages as history and
       // use continue() or prompt with an empty nudge
-      piAgent.replaceMessages(messages);
+      piAgent.state.messages = messages;
       await piAgent.prompt('Continue.');
     }
 
@@ -469,8 +536,8 @@ export class ConnectomeAgent {
     await piAgent.waitForIdle();
 
     // Check for errors caught internally by pi-agent
-    if (piAgent.state.error) {
-      throw new Error(piAgent.state.error);
+    if (piAgent.state.errorMessage) {
+      throw new Error(piAgent.state.errorMessage);
     }
 
     // 6. Extract new messages
@@ -523,19 +590,19 @@ export class ConnectomeAgent {
 
     // Configure pi-agent (append skill descriptions + RLM to system prompt)
     const composedPrompt = systemPrompt + this.skillPromptFragment + this.rlmPromptFragment;
-    piAgent.setSystemPrompt(composedPrompt);
-    piAgent.setModel(this.config.model);
+    piAgent.state.systemPrompt = composedPrompt;
+    piAgent.state.model = this.config.model;
 
     // Pass composed system prompt to RLM so child agents inherit it
     if (this.rlmState) this.rlmState.parentSystemPrompt = composedPrompt;
 
     if (this.config.thinkingLevel) {
-      piAgent.setThinkingLevel(this.config.thinkingLevel);
+      piAgent.state.thinkingLevel = this.config.thinkingLevel;
     }
 
     const veilTools = this.toolBridge.getAllTools();
     const extraTools = this.config.extraTools ?? [];
-    piAgent.setTools([...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools]);
+    piAgent.state.tools = [...veilTools, ...this.convertedHandlerTools, ...this.rlmTools, ...extraTools];
 
     if (continuation) {
       // Continuation mode: resume from the bot's last assistant turn.
@@ -558,22 +625,22 @@ export class ConnectomeAgent {
 
     // Normal mode: split into history + latest user message
     const { history, userMessage } = this.splitMessages(messages);
-    piAgent.replaceMessages(history);
+    piAgent.state.messages = history;
 
     const messageCountBefore = piAgent.state.messages.length;
 
     if (userMessage) {
       await piAgent.prompt(userMessage);
     } else {
-      piAgent.replaceMessages(messages);
+      piAgent.state.messages = messages;
       await piAgent.prompt('Continue.');
     }
 
     await piAgent.waitForIdle();
 
     // Check for errors caught internally by pi-agent
-    if (piAgent.state.error) {
-      throw new Error(piAgent.state.error);
+    if (piAgent.state.errorMessage) {
+      throw new Error(piAgent.state.errorMessage);
     }
 
     // Extract new messages
@@ -627,11 +694,11 @@ export class ConnectomeAgent {
     if (!lastAssistantText) {
       console.warn(`${prefix} Continuation requested but no prior assistant content found, falling back to prompt`);
       const piAgent = this.getOrCreatePiAgent(streamRef?.streamId || DEFAULT_STREAM_KEY);
-      piAgent.replaceMessages(messages);
+      piAgent.state.messages = messages;
       const countBefore = piAgent.state.messages.length;
       await piAgent.prompt('Continue.');
       await piAgent.waitForIdle();
-      if (piAgent.state.error) throw new Error(piAgent.state.error);
+      if (piAgent.state.errorMessage) throw new Error(piAgent.state.errorMessage);
       const newMsgs = piAgent.state.messages.slice(countBefore);
       return {
         content: this.extractTextContent(newMsgs),
