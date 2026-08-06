@@ -49,6 +49,38 @@ const REGION_PREFIX_RE = /^(us|eu|global|apac)\./;
  */
 const PINNED_MODELS: Record<string, Model<Api>> = {
   // ---- anthropic (direct) ----
+  // claude-opus-5: the OPPOSITE case from the elders below — too NEW for the pi
+  // version we pin (0.80.6), not too old. It landed in pi-ai's registry in 0.82.x,
+  // but 0.82's auth layer was rebuilt (getOAuthApiKey -> resolveProviderAuth /
+  // CredentialStore), which would force a rewrite + re-verification of the OAuth
+  // path all 11 subscription bots depend on. Pinning the model instead gets Opus 5
+  // running on our validated 0.80.6 baseline with zero auth risk — the same trick
+  // used for fable-5 / sonnet-5 / opus-4-8 before they entered the registry.
+  //
+  // Object captured verbatim from pi-ai 0.82.1's registry, so cost/context/compat
+  // are authoritative. 0.80.6's anthropic-messages provider honors the correctness-
+  // relevant compat flags (supportsTemperature, forceAdaptiveThinking) and
+  // thinkingLevelMap; supportsStrictTools is a 0.82 addition it simply ignores
+  // (tools aren't sent strict — a safe no-op, not a break). Carry it anyway so the
+  // pin stays truthful when we eventually move to the 0.82 auth model.
+  'claude-opus-5': {
+    id: 'claude-opus-5',
+    name: 'Claude Opus 5',
+    api: 'anthropic-messages',
+    provider: 'anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    reasoning: true,
+    input: ['text', 'image'],
+    cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    thinkingLevelMap: { xhigh: 'xhigh', max: 'max' },
+    compat: {
+      forceAdaptiveThinking: true,
+      supportsTemperature: false,
+      supportsStrictTools: true,
+    },
+  } as Model<Api>,
   'claude-3-opus-20240229': {
     id: 'claude-3-opus-20240229',
     name: 'Claude Opus 3',

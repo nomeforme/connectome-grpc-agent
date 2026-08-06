@@ -21,8 +21,8 @@
     "@anthropic-ai/bedrock-sdk": "^0.26.4",
     "@anthropic-ai/sdk": "0.61.0",
     "@connectome/connectome-ts": "workspace:*",
-    "@earendil-works/pi-agent-core": "^0.80.6",
-    "@earendil-works/pi-ai": "^0.80.6",
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
     "typebox": "^1.1.24"
   },
   "devDependencies": {
