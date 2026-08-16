@@ -3,7 +3,7 @@
  *
  * OmniVoice speaks the OpenAI TTS shape (`POST /v1/audio/speech`), so this
  * provider is a thin fetch wrapper. Runs against a self-hosted endpoint
- * (typically over Tailscale, e.g. `http://REDACTED-IP:8000`).
+ * (typically over Tailscale, e.g. `http://<tailscale-ip>:8000`).
  *
  * Failure semantics: throws on HTTP error, timeout, or abort. Caller
  * (ConnectomeEffector) catches and ships text-only.

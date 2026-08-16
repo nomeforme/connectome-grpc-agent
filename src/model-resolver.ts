@@ -313,7 +313,7 @@ export interface LocalModelOptions {
  * (llama.cpp / llama-server, LM Studio, vLLM, Ollama's /v1, …).
  *
  * For the connectome fleet this is a llama-server on the plantoidz GPU box,
- * addressed by its Tailscale IP (e.g. http://REDACTED-IP:1234/v1). Container →
+ * addressed by its Tailscale IP (e.g. http://<tailscale-ip>:1234/v1). Container →
  * Tailscale-IP routing works through the host's tailscale interface — use the
  * raw IP, NOT the MagicDNS name (which does not resolve inside bot containers).
  *
