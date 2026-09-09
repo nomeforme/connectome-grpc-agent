@@ -295,6 +295,64 @@ export function resolveGatewayModel(
 }
 
 /**
+ * Build a pi-ai Model that routes through OpenRouter's OpenAI-compatible
+ * /v1/chat/completions endpoint.
+ *
+ * Why this exists: OpenRouter still serves elder models that the first-party
+ * API has retired. claude-opus-4-1 started returning
+ * `404 not_found_error: model: claude-opus-4-1-20250805` direct, while
+ * `anthropic/claude-opus-4.1` on OpenRouter answers normally — verified
+ * streaming, tool calls, and a 138,470-token prompt before this was written.
+ *
+ * Unlike vercel-ai-gateway, NO apiKey injection is needed in
+ * ConnectomeAgent's streamFn: pi-ai's own env-key map already reads
+ * `OPENROUTER_API_KEY` for the `openrouter` provider (pi-ai
+ * dist/env-api-keys.js). The Vercel path only needs an override because its
+ * map reads `AI_GATEWAY_API_KEY` and we wanted a clearer name.
+ *
+ * Registry-first, like resolveModel: pi-ai 0.82 carries a correct
+ * `anthropic/claude-opus-4.1` entry (200k ctx, 32k max, $15/$75), so we use it
+ * and inherit any compat flags upstream knows about. The synthesized fallback
+ * is not paranoia — pi 0.80 deleted every legacy Claude model from the
+ * anthropic and bedrock catalogs, and the models this adapter exists to reach
+ * are exactly the ones most likely to be dropped next.
+ *
+ * @param slug — OpenRouter model slug, e.g. "anthropic/claude-opus-4.1"
+ * @param opts — optional context/token/cost overrides for models absent from
+ *               the registry
+ */
+export function resolveOpenRouterModel(
+  slug: string,
+  opts: {
+    contextWindow?: number;
+    maxTokens?: number;
+    cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  } = {},
+): Model<'openai-completions'> {
+  const registryEntry = getModels('openrouter').find((m) => m.id === slug);
+
+  if (registryEntry && !opts.contextWindow && !opts.maxTokens && !opts.cost) {
+    return registryEntry as Model<'openai-completions'>;
+  }
+
+  return {
+    ...(registryEntry as Model<'openai-completions'> | undefined),
+    id: slug,
+    name: registryEntry?.name ?? slug,
+    api: 'openai-completions',
+    provider: 'openrouter',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    reasoning: registryEntry?.reasoning ?? false,
+    input: (registryEntry?.input as ('text' | 'image')[] | undefined) ?? ['text'],
+    cost:
+      opts.cost ??
+      registryEntry?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: opts.contextWindow ?? registryEntry?.contextWindow ?? 200_000,
+    maxTokens: opts.maxTokens ?? registryEntry?.maxTokens ?? 8192,
+  } as Model<'openai-completions'>;
+}
+
+/**
  * Options for resolveLocalModel.
  */
 export interface LocalModelOptions {
